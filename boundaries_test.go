@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 // These tests fill coverage gaps and pin down the sharp edges of expr's

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 // stubCompiler is a minimal Compiler used by tests that exercise the

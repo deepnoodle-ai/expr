@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 func TestEval_Literals(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 // TestRun_CancelledBeforeRun verifies that an already-cancelled context

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 // These tests pin specific adversarial inputs. The fuzz targets in
