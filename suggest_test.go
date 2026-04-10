@@ -3,7 +3,7 @@ package expr
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 func TestSuggest_UndefinedIdentDidYouMean(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/deepnoodle-ai/expr/template"
-	"github.com/stretchr/testify/require"
+	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
 // lookupCompiler resolves dotted identifier paths against a
