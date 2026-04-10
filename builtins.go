@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sort"
@@ -32,18 +33,104 @@ import (
 //	sprintf(fmt, ...) fmt.Sprintf passthrough
 func Builtins() map[string]any {
 	return map[string]any{
-		"len":      builtinLen,
-		"string":   builtinString,
-		"int":      builtinInt,
-		"float":    builtinFloat,
-		"bool":     IsTruthyValue,
-		"contains": builtinContains,
-		"has":      builtinHas,
-		"keys":     builtinKeys,
-		"lower":    strings.ToLower,
-		"upper":    strings.ToUpper,
+		"len":      Func(nativeLen),
+		"string":   Func(nativeString),
+		"int":      Func(nativeInt),
+		"float":    Func(nativeFloat),
+		"bool":     Func(nativeBool),
+		"contains": Func(nativeContains),
+		"has":      Func(nativeHas),
+		"keys":     Func(nativeKeys),
+		"lower":    Func(nativeLower),
+		"upper":    Func(nativeUpper),
 		"sprintf":  fmt.Sprintf,
 	}
+}
+
+// checkArity returns a uniform error for builtin arity mismatches.
+func checkArity(name string, want, got int) error {
+	if want == got {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: expected %d args, got %d", ErrEvaluate, name, want, got)
+}
+
+func nativeLen(_ context.Context, args []any) (any, error) {
+	if err := checkArity("len", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinLen(args[0])
+}
+
+func nativeString(_ context.Context, args []any) (any, error) {
+	if err := checkArity("string", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinString(args[0]), nil
+}
+
+func nativeInt(_ context.Context, args []any) (any, error) {
+	if err := checkArity("int", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinInt(args[0])
+}
+
+func nativeFloat(_ context.Context, args []any) (any, error) {
+	if err := checkArity("float", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinFloat(args[0])
+}
+
+func nativeBool(_ context.Context, args []any) (any, error) {
+	if err := checkArity("bool", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return IsTruthyValue(args[0]), nil
+}
+
+func nativeContains(_ context.Context, args []any) (any, error) {
+	if err := checkArity("contains", 2, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinContains(args[0], args[1])
+}
+
+func nativeHas(_ context.Context, args []any) (any, error) {
+	if err := checkArity("has", 2, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinHas(args[0], args[1])
+}
+
+func nativeKeys(_ context.Context, args []any) (any, error) {
+	if err := checkArity("keys", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinKeys(args[0])
+}
+
+func nativeLower(_ context.Context, args []any) (any, error) {
+	if err := checkArity("lower", 1, len(args)); err != nil {
+		return nil, err
+	}
+	s, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("%w: lower: expected string, got %T", ErrEvaluate, args[0])
+	}
+	return strings.ToLower(s), nil
+}
+
+func nativeUpper(_ context.Context, args []any) (any, error) {
+	if err := checkArity("upper", 1, len(args)); err != nil {
+		return nil, err
+	}
+	s, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("%w: upper: expected string, got %T", ErrEvaluate, args[0])
+	}
+	return strings.ToUpper(s), nil
 }
 
 func builtinLen(v any) (int, error) {

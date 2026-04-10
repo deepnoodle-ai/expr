@@ -57,7 +57,8 @@ const MaxEvalDepth = 256
 // Engine compiles expressions into reusable programs. An Engine is safe
 // for concurrent use once configured. Create one with New.
 type Engine struct {
-	funcs map[string]any
+	funcs    map[string]any
+	prepared map[string]*preparedFunc
 }
 
 // Option configures an Engine.
@@ -67,7 +68,7 @@ type Option func(*Engine)
 // opt in to the standard builtin set, WithFunctions to register your own,
 // or both.
 func New(opts ...Option) *Engine {
-	e := &Engine{funcs: map[string]any{}}
+	e := &Engine{funcs: map[string]any{}, prepared: map[string]*preparedFunc{}}
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -94,6 +95,15 @@ func WithFunctions(funcs map[string]any) Option {
 	return func(e *Engine) {
 		for name, fn := range funcs {
 			e.funcs[name] = fn
+			pf, err := prepareFunc(name, fn)
+			if err != nil {
+				// Defer error surfacing to call-time; store a
+				// nil-native preparedFunc entry so lookups still
+				// find the name (useful for better error hints).
+				e.prepared[name] = &preparedFunc{name: name}
+				continue
+			}
+			e.prepared[name] = pf
 		}
 	}
 }
@@ -148,7 +158,9 @@ func (e *Engine) Compile(code string, opts ...CompileOption) (*Program, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
 	}
-	return &Program{source: code, root: node, funcs: e.funcs}, nil
+	p := &Program{source: code, root: node, funcs: e.funcs, prepared: e.prepared}
+	p.compile()
+	return p, nil
 }
 
 // mapFormName is the internal identifier that source-level `map(`
