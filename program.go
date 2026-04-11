@@ -13,9 +13,192 @@ import (
 // Program is a compiled expression. Programs are immutable and safe for
 // concurrent evaluation across goroutines.
 type Program struct {
-	source string
-	root   ast.Expr
-	funcs  map[string]any
+	source   string
+	root     ast.Expr
+	funcs    map[string]any
+	prepared map[string]*preparedFunc
+
+	// callCache maps CallExpr nodes to a pre-resolved preparedFunc for
+	// the common case of a bare-identifier call target that resolves to
+	// a registered function and is not shadowed by the runtime env.
+	// Populated during compile(). Absent entries fall through to the
+	// normal runtime resolution path.
+	callCache map[*ast.CallExpr]*preparedFunc
+
+	// litCache maps BasicLit nodes to their pre-parsed value so
+	// evalLiteral is a single map lookup instead of repeating
+	// strconv work on every Run.
+	litCache map[*ast.BasicLit]any
+}
+
+// compile walks the root AST once to populate the lookup caches used
+// during Run and to fold constant subtrees. Pre-resolving what we can
+// at Compile time keeps the hot path allocation-free and
+// reflection-free for common shapes.
+func (p *Program) compile() {
+	p.callCache = map[*ast.CallExpr]*preparedFunc{}
+	p.litCache = map[*ast.BasicLit]any{}
+	p.root = p.prewalk(p.root)
+}
+
+// constValue reports the pre-computed value of a folded/literal node,
+// if any. It recognizes BasicLit (via litCache) and the three
+// keyword-backed idents true/false/nil.
+func (p *Program) constValue(node ast.Expr) (any, bool) {
+	switch n := node.(type) {
+	case *ast.BasicLit:
+		if v, ok := p.litCache[n]; ok {
+			return v, true
+		}
+	case *ast.Ident:
+		switch n.Name {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		case "nil":
+			return nil, true
+		}
+	}
+	return nil, false
+}
+
+// wrapConst turns a folded value into an ast.Expr that eval can see
+// as a constant. BasicLit-backed kinds populate litCache so eval
+// skips the strconv re-parse. Bools and nil use the keyword idents.
+func (p *Program) wrapConst(v any) (ast.Expr, bool) {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return &ast.Ident{Name: "true"}, true
+		}
+		return &ast.Ident{Name: "false"}, true
+	case nil:
+		return &ast.Ident{Name: "nil"}, true
+	case int64:
+		lit := &ast.BasicLit{Kind: token.INT, Value: strconv.FormatInt(x, 10)}
+		p.litCache[lit] = x
+		return lit, true
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, false
+		}
+		lit := &ast.BasicLit{Kind: token.FLOAT, Value: strconv.FormatFloat(x, 'g', -1, 64)}
+		p.litCache[lit] = x
+		return lit, true
+	case string:
+		lit := &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(x)}
+		p.litCache[lit] = x
+		return lit, true
+	}
+	return nil, false
+}
+
+func (p *Program) prewalk(node ast.Expr) ast.Expr {
+	switch n := node.(type) {
+	case *ast.BasicLit:
+		if v, err := evalLiteral(n); err == nil {
+			p.litCache[n] = v
+		}
+		return n
+	case *ast.ParenExpr:
+		n.X = p.prewalk(n.X)
+		// Unwrap parens around constants so constValue sees them.
+		if _, ok := p.constValue(n.X); ok {
+			return n.X
+		}
+		return n
+	case *ast.UnaryExpr:
+		n.X = p.prewalk(n.X)
+		if xv, ok := p.constValue(n.X); ok {
+			if v, err := applyUnary(n.Op, xv); err == nil {
+				if wrapped, ok := p.wrapConst(v); ok {
+					return wrapped
+				}
+			}
+		}
+		return n
+	case *ast.BinaryExpr:
+		n.X = p.prewalk(n.X)
+		n.Y = p.prewalk(n.Y)
+		// Skip logical ops: their short-circuit semantics are visible
+		// to side-effects, and the LAND/LOR path in evalBinary is
+		// fast enough that folding a pure-literal `true && false`
+		// isn't worth a second code path.
+		if n.Op != token.LAND && n.Op != token.LOR {
+			if xv, ok := p.constValue(n.X); ok {
+				if yv, ok2 := p.constValue(n.Y); ok2 {
+					if v, err := applyBinary(n.Op, xv, yv); err == nil {
+						if wrapped, ok := p.wrapConst(v); ok {
+							return wrapped
+						}
+					}
+				}
+			}
+		}
+		return n
+	case *ast.SelectorExpr:
+		n.X = p.prewalk(n.X)
+		return n
+	case *ast.IndexExpr:
+		n.X = p.prewalk(n.X)
+		n.Index = p.prewalk(n.Index)
+		return n
+	case *ast.CallExpr:
+		// Only cache bare-identifier call targets that resolve to a
+		// registered, prepared function AND are not higher-order
+		// special forms. The form dispatcher needs the raw CallExpr.
+		if ident, ok := n.Fun.(*ast.Ident); ok {
+			name := ident.Name
+			if _, isForm := higherOrderForms[name]; !isForm && name != mapFormName {
+				if pf, ok := p.prepared[name]; ok && (pf.native != nil || pf.fv.IsValid()) {
+					p.callCache[n] = pf
+				}
+			}
+		}
+		for i, a := range n.Args {
+			n.Args[i] = p.prewalk(a)
+		}
+		return n
+	case *ast.CompositeLit:
+		for i, e := range n.Elts {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				kv.Key = p.prewalk(kv.Key)
+				kv.Value = p.prewalk(kv.Value)
+			} else {
+				n.Elts[i] = p.prewalk(e)
+			}
+		}
+		return n
+	}
+	return node
+}
+
+// applyUnary is the constant-folding helper for unary ops. It mirrors
+// the runtime evalUnary logic but works on already-evaluated values
+// so the fold pass never re-enters the main evaluator.
+func applyUnary(op token.Token, v any) (any, error) {
+	switch op {
+	case token.NOT:
+		return !isTruthy(v), nil
+	case token.SUB:
+		if i, ok := toInt64(v); ok {
+			return -i, nil
+		}
+		if f, ok := toFloat64(v); ok {
+			return -f, nil
+		}
+		return nil, fmt.Errorf("%w: cannot negate %T", ErrEvaluate, v)
+	case token.ADD:
+		if _, ok := toInt64(v); ok {
+			return v, nil
+		}
+		if _, ok := toFloat64(v); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("%w: cannot apply unary + to %T", ErrEvaluate, v)
+	}
+	return nil, fmt.Errorf("%w: unsupported unary operator %v", ErrEvaluate, op)
 }
 
 var _ Script = (*Program)(nil)
@@ -57,6 +240,9 @@ func (p *Program) eval(ctx context.Context, node ast.Expr, env any, depth int) (
 	depth++
 	switch n := node.(type) {
 	case *ast.BasicLit:
+		if v, ok := p.litCache[n]; ok {
+			return v, nil
+		}
 		return evalLiteral(n)
 	case *ast.Ident:
 		return evalIdent(n, env, p.funcs)
@@ -541,6 +727,24 @@ func indexValue(recv, idx any) (any, error) {
 }
 
 func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	// Fast path: bare-identifier call target that resolved to a
+	// registered prepared function at compile time, and is not
+	// shadowed by the runtime env. This covers the overwhelming
+	// majority of builtin call sites (len, has, contains, ...).
+	if pf := p.callCache[n]; pf != nil {
+		if _, shadowed := lookupEnv(env, pf.name); !shadowed {
+			args := make([]any, len(n.Args))
+			for i, a := range n.Args {
+				v, err := p.eval(ctx, a, env, depth)
+				if err != nil {
+					return nil, err
+				}
+				args[i] = v
+			}
+			return callPrepared(ctx, pf, args)
+		}
+	}
+
 	// Higher-order special forms intercept the normal call path when
 	// the target is a bare identifier that has not been overridden in
 	// the caller's env or funcs. They receive the predicate AST

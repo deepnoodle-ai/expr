@@ -28,14 +28,16 @@ func TestLimit_DeepSelectorChain(t *testing.T) {
 }
 
 func TestLimit_DeepBinaryChain(t *testing.T) {
-	// Left-associative: 1+1+1+1+... becomes a left-leaning tree with
-	// depth proportional to the operand count.
+	// Left-associative: a+a+a+a+... becomes a left-leaning tree with
+	// depth proportional to the operand count. Using the identifier
+	// `a` keeps the tree alive past compile-time constant folding,
+	// so the depth limit is exercised by the runtime walker.
 	var b strings.Builder
-	b.WriteString("1")
+	b.WriteString("a")
 	for i := 0; i < MaxEvalDepth+5; i++ {
-		b.WriteString("+1")
+		b.WriteString("+a")
 	}
-	_, err := Eval(t.Context(), b.String(), nil)
+	_, err := Eval(t.Context(), b.String(), map[string]any{"a": int64(1)})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nested too deeply")
@@ -45,9 +47,11 @@ func TestLimit_DeepParens(t *testing.T) {
 	// Parenthesis nesting is the cheapest way to build a deep AST, but
 	// ParseExpr itself may stack-overflow on truly pathological input.
 	// Stay well below that with something our cap still catches.
+	// Use a bare identifier so compile-time folding does not collapse
+	// the expression into a single literal.
 	n := MaxEvalDepth + 5
-	expr := strings.Repeat("(", n) + "1" + strings.Repeat(")", n)
-	_, err := Eval(t.Context(), expr, nil)
+	expr := strings.Repeat("(", n) + "a" + strings.Repeat(")", n)
+	_, err := Eval(t.Context(), expr, map[string]any{"a": int64(1)})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
