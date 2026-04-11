@@ -18,7 +18,11 @@ func main() {
 		},
 	}
 
-	v, err := expr.Eval(ctx, `user.age >= 18 && contains(user.roles, "admin")`, env, expr.WithBuiltins())
+	p, err := expr.Compile(`user.age >= 18 && contains(user.roles, "admin")`, expr.WithBuiltins())
+	if err != nil {
+		panic(err)
+	}
+	v, err := p.Run(ctx, env)
 	if err != nil {
 		panic(err)
 	}

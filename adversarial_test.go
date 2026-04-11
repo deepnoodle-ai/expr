@@ -22,7 +22,7 @@ func TestLimit_DeepSelectorChain(t *testing.T) {
 	for i := 0; i < MaxEvalDepth+5; i++ {
 		expr += ".f"
 	}
-	_, err := Eval(t.Context(), expr, map[string]any{"a": map[string]any{"f": nil}})
+	_, err := evalExpr(t.Context(), expr, map[string]any{"a": map[string]any{"f": nil}})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -37,7 +37,7 @@ func TestLimit_DeepBinaryChain(t *testing.T) {
 	for i := 0; i < MaxEvalDepth+5; i++ {
 		b.WriteString("+a")
 	}
-	_, err := Eval(t.Context(), b.String(), map[string]any{"a": int64(1)})
+	_, err := evalExpr(t.Context(), b.String(), map[string]any{"a": int64(1)})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nested too deeply")
@@ -51,7 +51,7 @@ func TestLimit_DeepParens(t *testing.T) {
 	// the expression into a single literal.
 	n := MaxEvalDepth + 5
 	expr := strings.Repeat("(", n) + "a" + strings.Repeat(")", n)
-	_, err := Eval(t.Context(), expr, map[string]any{"a": int64(1)})
+	_, err := evalExpr(t.Context(), expr, map[string]any{"a": int64(1)})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -84,7 +84,7 @@ func TestReflect_UnexportedFieldDenied(t *testing.T) {
 	// Reading an unexported field via reflect.Value.Interface panics. We
 	// check CanInterface and report "not found" instead.
 	env := map[string]any{"x": withUnexported{Public: 1}}
-	_, err := Eval(t.Context(), "x.secret", env)
+	_, err := evalExpr(t.Context(), "x.secret", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "not found")
@@ -94,7 +94,7 @@ func TestReflect_UnexportedFieldDeniedStructEnv(t *testing.T) {
 	// Same, but the struct is the whole env. lookupEnv already guards
 	// this, but we pin it so neither path regresses.
 	env := withUnexported{Public: 1}
-	_, err := Eval(t.Context(), "secret", env)
+	_, err := evalExpr(t.Context(), "secret", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -103,7 +103,7 @@ func TestReflect_NilIndexOnTypedMap(t *testing.T) {
 	// reflect.ValueOf(nil).Type() panics — guarding nil in indexValue
 	// keeps user expressions safe.
 	env := map[string]any{"m": map[int]string{1: "one"}}
-	_, err := Eval(t.Context(), "m[nil]", env)
+	_, err := evalExpr(t.Context(), "m[nil]", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nil as map key")
@@ -113,7 +113,7 @@ func TestReflect_NilFunctionValue(t *testing.T) {
 	// A typed nil function value is reflect.Func kind with IsNil() true.
 	// Calling it panics, so callFunction has to reject it up front.
 	env := map[string]any{"fn": (func() int)(nil)}
-	_, err := Eval(t.Context(), "fn()", env)
+	_, err := evalExpr(t.Context(), "fn()", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nil function")
@@ -124,7 +124,7 @@ func TestReflect_NilFunctionFieldValue(t *testing.T) {
 		Fn func(int) int
 	}
 	env := map[string]any{"h": Holder{Fn: nil}}
-	_, err := Eval(t.Context(), "h.Fn(1)", env)
+	_, err := evalExpr(t.Context(), "h.Fn(1)", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nil function")
@@ -134,7 +134,7 @@ func TestReflect_NilFunctionFieldValue(t *testing.T) {
 
 // Ints should never silently wrap when narrowing to a smaller type.
 func TestConvert_IntOverflowRejected(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n },
 		"u8":  func(n uint8) uint8 { return n },
 		"u16": func(n uint16) uint16 { return n },
@@ -154,7 +154,7 @@ func TestConvert_IntOverflowRejected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			_, err := Eval(t.Context(), tc.expr, nil, opts...)
+			_, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.Error(t, err, "%s should reject overflow", tc.expr)
 			require.ErrorIs(t, err, ErrEvaluate)
 		})
@@ -162,7 +162,7 @@ func TestConvert_IntOverflowRejected(t *testing.T) {
 }
 
 func TestConvert_IntInRangeAllowed(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n },
 		"u8":  func(n uint8) uint8 { return n },
 		"i32": func(n int32) int32 { return n },
@@ -179,7 +179,7 @@ func TestConvert_IntInRangeAllowed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -187,50 +187,50 @@ func TestConvert_IntInRangeAllowed(t *testing.T) {
 }
 
 func TestConvert_FloatToIntRange(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n },
 		"i64": func(n int64) int64 { return n },
 	})}
 	// Truncation toward zero is intentional.
-	got, err := Eval(t.Context(), "i8(3.9)", nil, opts...)
+	got, err := evalExpr(t.Context(), "i8(3.9)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(3), got)
 
-	got, err = Eval(t.Context(), "i8(-3.9)", nil, opts...)
+	got, err = evalExpr(t.Context(), "i8(-3.9)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(-3), got)
 
 	// Out-of-range float → target int kind.
-	_, err = Eval(t.Context(), "i8(1000.0)", nil, opts...)
+	_, err = evalExpr(t.Context(), "i8(1000.0)", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestConvert_NaNAndInfRejected(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i32":  func(n int32) int32 { return n },
 		"makeNaN": func() float64 { return math.NaN() },
 		"makeInf": func() float64 { return math.Inf(1) },
 	})}
-	_, err := Eval(t.Context(), "i32(makeNaN())", nil, opts...)
+	_, err := evalExpr(t.Context(), "i32(makeNaN())", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 
-	_, err = Eval(t.Context(), "i32(makeInf())", nil, opts...)
+	_, err = evalExpr(t.Context(), "i32(makeInf())", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestConvert_UintSource(t *testing.T) {
 	// env may supply uint values; they must narrow with the same checks.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i8": func(n int8) int8 { return n },
 	})}
-	_, err := Eval(t.Context(), "i8(v)", map[string]any{"v": uint64(300)}, opts...)
+	_, err := evalExpr(t.Context(), "i8(v)", map[string]any{"v": uint64(300)}, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 
-	got, err := Eval(t.Context(), "i8(v)", map[string]any{"v": uint64(100)}, opts...)
+	got, err := evalExpr(t.Context(), "i8(v)", map[string]any{"v": uint64(100)}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(100), got)
 }
@@ -239,7 +239,7 @@ func TestConvert_UintSource(t *testing.T) {
 
 func TestLiteral_LargeInt(t *testing.T) {
 	// strconv.ParseInt rejects; we report via ErrEvaluate, not panic.
-	_, err := Eval(t.Context(), "9999999999999999999999999999", nil)
+	_, err := evalExpr(t.Context(), "9999999999999999999999999999", nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -248,7 +248,7 @@ func TestLiteral_HugeStringLiteral(t *testing.T) {
 	// A string literal near the source limit must round-trip.
 	payload := strings.Repeat("a", MaxSourceLength-10)
 	src := `"` + payload + `"`
-	got, err := Eval(t.Context(), src, nil)
+	got, err := evalExpr(t.Context(), src, nil)
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 }
@@ -287,7 +287,7 @@ func TestSyntax_UnsupportedNodesAllReject(t *testing.T) {
 	}
 	for _, expr := range cases {
 		t.Run(expr, func(t *testing.T) {
-			_, err := Eval(t.Context(), expr, map[string]any{"x": []any{1, 2, 3}, "p": 1, "ch": 1})
+			_, err := evalExpr(t.Context(), expr, map[string]any{"x": []any{1, 2, 3}, "p": 1, "ch": 1})
 			require.Error(t, err, "%s should reject", expr)
 		})
 	}
@@ -300,7 +300,7 @@ func TestMap_InterfaceKeys(t *testing.T) {
 	env := map[string]any{
 		"m": map[any]any{"a": 1, "b": 2},
 	}
-	got, err := Eval(t.Context(), `m["a"]`, env)
+	got, err := evalExpr(t.Context(), `m["a"]`, env)
 	require.NoError(t, err)
 	require.Equal(t, 1, got)
 }
@@ -310,11 +310,11 @@ func TestMap_InterfaceKeys(t *testing.T) {
 func TestUserCode_PanicIsNotOurBug(t *testing.T) {
 	// The engine does not recover panics from user code — documented in
 	// the spec. Pin the current behavior so changes are deliberate.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"boom": func() int { panic("nope") },
 	})}
 	require.Panics(t, func() {
-		_, _ = Eval(t.Context(), "boom()", nil, opts...)
+		_, _ = evalExpr(t.Context(), "boom()", nil, opts...)
 	})
 }
 
@@ -327,7 +327,7 @@ func TestEquality_UncomparableReturnsError(t *testing.T) {
 		"a": []int{1, 2, 3},
 		"b": []int{1, 2, 3},
 	}
-	_, err := Eval(t.Context(), "a == b", env)
+	_, err := evalExpr(t.Context(), "a == b", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -341,10 +341,10 @@ func (w wrappedErr) Unwrap() error { return w.inner }
 
 func TestUserError_UnwrapChainPreserved(t *testing.T) {
 	sentinel := errors.New("root")
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"fail": func() (int, error) { return 0, wrappedErr{inner: sentinel} },
 	})}
-	_, err := Eval(t.Context(), "fail()", nil, opts...)
+	_, err := evalExpr(t.Context(), "fail()", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, sentinel)
 }

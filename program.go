@@ -219,7 +219,7 @@ func (p *Program) Source() string { return p.source }
 // expression: `f(x)` first looks up `f` in env, and if it finds a
 // function value it is invoked through the same reflect-based dispatch
 // used for [WithFunctions]-registered functions. Prefer registering
-// functions via CompileOptions when possible — those go through a
+// functions via Options when possible — those go through a
 // faster prepared path and participate in "did you mean…" diagnostics
 // — but putting callables in env is a useful escape hatch for
 // per-request closures or hosts that want to rebind helpers on every

@@ -47,10 +47,10 @@ type templateSegment struct {
 }
 
 // NewTemplate parses raw and pre-compiles every `${...}` expression
-// with the given CompileOptions. Strings without any `${...}` are
+// with the given Options. Strings without any `${...}` are
 // accepted and become constant templates that return raw unchanged
 // from [Template.Render].
-func NewTemplate(raw string, opts ...CompileOption) (*Template, error) {
+func NewTemplate(raw string, opts ...Option) (*Template, error) {
 	return parseTemplate(raw, func(code string) (runner, error) {
 		return Compile(code, opts...)
 	})

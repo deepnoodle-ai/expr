@@ -39,7 +39,11 @@ func main() {
 		},
 	}
 
-	v, err := expr.Eval(ctx, `Subtotal() > 100 && len(Items) >= 2`, order, expr.WithBuiltins())
+	p, err := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins())
+	if err != nil {
+		panic(err)
+	}
+	v, err := p.Run(ctx, order)
 	if err != nil {
 		panic(err)
 	}

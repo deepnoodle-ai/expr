@@ -16,28 +16,28 @@ import (
 // --- Unary operators ---
 
 func TestUnary_NegateFloat(t *testing.T) {
-	got, err := Eval(t.Context(), "-3.14", nil)
+	got, err := evalExpr(t.Context(), "-3.14", nil)
 	require.NoError(t, err)
 	require.Equal(t, -3.14, got)
 }
 
 func TestUnary_NegateUnsupported(t *testing.T) {
-	_, err := Eval(t.Context(), `-"hi"`, nil)
+	_, err := evalExpr(t.Context(), `-"hi"`, nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "cannot negate")
 }
 
 // Unary `+` requires a numeric operand. `+42` is a no-op, `+"abc"` errors.
 func TestUnary_PlusRequiresNumeric(t *testing.T) {
-	got, err := Eval(t.Context(), "+42", nil)
+	got, err := evalExpr(t.Context(), "+42", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), got)
 
-	got, err = Eval(t.Context(), "+3.14", nil)
+	got, err = evalExpr(t.Context(), "+3.14", nil)
 	require.NoError(t, err)
 	require.Equal(t, 3.14, got)
 
-	_, err = Eval(t.Context(), `+"abc"`, nil)
+	_, err = evalExpr(t.Context(), `+"abc"`, nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "unary +")
 }
@@ -56,7 +56,7 @@ func TestUnary_NotUsesTruthiness(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil)
+			got, err := evalExpr(t.Context(), tc.expr, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -69,28 +69,28 @@ func TestBinary_DivideByZero(t *testing.T) {
 	cases := []string{"1 / 0", "1 % 0", "1.0 / 0.0"}
 	for _, expr := range cases {
 		t.Run(expr, func(t *testing.T) {
-			_, err := Eval(t.Context(), expr, nil)
+			_, err := evalExpr(t.Context(), expr, nil)
 			require.ErrorIs(t, err, ErrEvaluate)
 		})
 	}
 }
 
 func TestBinary_FloatModulo(t *testing.T) {
-	got, err := Eval(t.Context(), "10.5 % 2", nil)
+	got, err := evalExpr(t.Context(), "10.5 % 2", nil)
 	require.NoError(t, err)
 	require.InDelta(t, 0.5, got, 1e-9)
 
-	got, err = Eval(t.Context(), "10 % 3.5", nil)
+	got, err = evalExpr(t.Context(), "10 % 3.5", nil)
 	require.NoError(t, err)
 	require.InDelta(t, 3.0, got, 1e-9)
 
-	_, err = Eval(t.Context(), "1.0 % 0.0", nil)
+	_, err = evalExpr(t.Context(), "1.0 % 0.0", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "modulo by zero")
 }
 
 func TestBinary_MixedTypesReportError(t *testing.T) {
-	_, err := Eval(t.Context(), `"a" + 1`, nil)
+	_, err := evalExpr(t.Context(), `"a" + 1`, nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "not supported")
 }
@@ -98,34 +98,34 @@ func TestBinary_MixedTypesReportError(t *testing.T) {
 // --- Literals ---
 
 func TestLiteral_HexAndOctal(t *testing.T) {
-	got, err := Eval(t.Context(), "0xff", nil)
+	got, err := evalExpr(t.Context(), "0xff", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(255), got)
 
-	got, err = Eval(t.Context(), "0o17", nil)
+	got, err = evalExpr(t.Context(), "0o17", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(15), got)
 }
 
 func TestLiteral_Char(t *testing.T) {
 	// CHAR literals evaluate to their rune value as an int64, matching Go.
-	got, err := Eval(t.Context(), "'a'", nil)
+	got, err := evalExpr(t.Context(), "'a'", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64('a'), got)
 
-	got, err = Eval(t.Context(), `'\n'`, nil)
+	got, err = evalExpr(t.Context(), `'\n'`, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64('\n'), got)
 }
 
 func TestLiteral_ImagUnsupported(t *testing.T) {
 	// Imaginary literals parse but expr doesn't model complex numbers.
-	_, err := Eval(t.Context(), "1i", nil)
+	_, err := evalExpr(t.Context(), "1i", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestLiteral_IntOverflow(t *testing.T) {
-	_, err := Eval(t.Context(), "99999999999999999999", nil)
+	_, err := evalExpr(t.Context(), "99999999999999999999", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
@@ -142,20 +142,20 @@ func TestEquality_TypedNilEqualsNil(t *testing.T) {
 		"ptr":   (*S)(nil),
 	}
 	for _, expr := range []string{"slice == nil", "dict == nil", "ptr == nil"} {
-		got, err := Eval(t.Context(), expr, env)
+		got, err := evalExpr(t.Context(), expr, env)
 		require.NoError(t, err, expr)
 		require.Equal(t, true, got, expr)
 	}
 
 	// Non-nil values of nilable types still compare false against nil.
 	env = map[string]any{"slice": []any{1}}
-	got, err := Eval(t.Context(), "slice == nil", env)
+	got, err := evalExpr(t.Context(), "slice == nil", env)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
 
 func TestEquality_NilEqualsNil(t *testing.T) {
-	got, err := Eval(t.Context(), "nil == nil", nil)
+	got, err := evalExpr(t.Context(), "nil == nil", nil)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 }
@@ -164,7 +164,7 @@ func TestEquality_CrossNumericTypes(t *testing.T) {
 	// int via reflection coerces to int64/float64 in looseEqual.
 	env := map[string]any{"a": int32(7), "b": int64(7), "c": float64(7)}
 	for _, expr := range []string{"a == b", "a == c", "b == c"} {
-		got, err := Eval(t.Context(), expr, env)
+		got, err := evalExpr(t.Context(), expr, env)
 		require.NoError(t, err, expr)
 		require.Equal(t, true, got, expr)
 	}
@@ -173,7 +173,7 @@ func TestEquality_CrossNumericTypes(t *testing.T) {
 func TestEquality_DifferentTypesNotEqual(t *testing.T) {
 	// Comparable but different types: returns false, no error.
 	env := map[string]any{"a": "1", "b": 1}
-	got, err := Eval(t.Context(), "a == b", env)
+	got, err := evalExpr(t.Context(), "a == b", env)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
@@ -184,15 +184,15 @@ func TestEquality_DifferentTypesNotEqual(t *testing.T) {
 // point as a one-character string. Matches scripting-language
 // expectations and is round-trip safe for non-ASCII text.
 func TestIndex_StringByRune(t *testing.T) {
-	got, err := Eval(t.Context(), `"abc"[1]`, nil)
+	got, err := evalExpr(t.Context(), `"abc"[1]`, nil)
 	require.NoError(t, err)
 	require.Equal(t, "b", got)
 
-	got, err = Eval(t.Context(), `"héllo"[1]`, nil)
+	got, err = evalExpr(t.Context(), `"héllo"[1]`, nil)
 	require.NoError(t, err)
 	require.Equal(t, "é", got)
 
-	got, err = Eval(t.Context(), `"héllo"[4]`, nil)
+	got, err = evalExpr(t.Context(), `"héllo"[4]`, nil)
 	require.NoError(t, err)
 	require.Equal(t, "o", got)
 }
@@ -200,52 +200,52 @@ func TestIndex_StringByRune(t *testing.T) {
 func TestIndex_StringRuneOutOfRange(t *testing.T) {
 	// "héllo" is 5 runes — index 5 is out of range even though the
 	// underlying byte length is 6.
-	_, err := Eval(t.Context(), `"héllo"[5]`, nil)
+	_, err := evalExpr(t.Context(), `"héllo"[5]`, nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "out of range")
 }
 
 func TestIndex_NegativeAndOutOfRange(t *testing.T) {
 	env := map[string]any{"s": []any{1, 2, 3}}
-	_, err := Eval(t.Context(), "s[-1]", env)
+	_, err := evalExpr(t.Context(), "s[-1]", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "out of range")
 
-	_, err = Eval(t.Context(), "s[10]", env)
+	_, err = evalExpr(t.Context(), "s[10]", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestIndex_TypedMap(t *testing.T) {
 	env := map[string]any{"m": map[int]string{1: "one", 2: "two"}}
-	got, err := Eval(t.Context(), "m[1]", env)
+	got, err := evalExpr(t.Context(), "m[1]", env)
 	require.NoError(t, err)
 	require.Equal(t, "one", got)
 
 	// Missing key surfaces as an error, not a zero value.
-	_, err = Eval(t.Context(), "m[99]", env)
+	_, err = evalExpr(t.Context(), "m[99]", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestIndex_MapWithNonStringKeyViaSelector(t *testing.T) {
 	env := map[string]any{"m": map[int]string{1: "one"}}
-	_, err := Eval(t.Context(), `m["x"]`, env)
+	_, err := evalExpr(t.Context(), `m["x"]`, env)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestIndex_OnUnsupportedType(t *testing.T) {
 	env := map[string]any{"x": 42}
-	_, err := Eval(t.Context(), "x[0]", env)
+	_, err := evalExpr(t.Context(), "x[0]", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestIndex_NilReceiver(t *testing.T) {
-	_, err := Eval(t.Context(), "nil[0]", nil)
+	_, err := evalExpr(t.Context(), "nil[0]", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestIndex_MapKeyWrongType(t *testing.T) {
 	env := map[string]any{"m": map[string]any{"k": 1}}
-	_, err := Eval(t.Context(), "m[1]", env)
+	_, err := evalExpr(t.Context(), "m[1]", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "must be string")
 }
@@ -253,14 +253,14 @@ func TestIndex_MapKeyWrongType(t *testing.T) {
 // --- Selector edge cases ---
 
 func TestSelector_NilReceiver(t *testing.T) {
-	_, err := Eval(t.Context(), "nil.x", nil)
+	_, err := evalExpr(t.Context(), "nil.x", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestSelector_StructFieldMissing(t *testing.T) {
 	type S struct{ A int }
 	env := map[string]any{"s": S{A: 1}}
-	_, err := Eval(t.Context(), "s.B", env)
+	_, err := evalExpr(t.Context(), "s.B", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "field")
 }
@@ -268,7 +268,7 @@ func TestSelector_StructFieldMissing(t *testing.T) {
 func TestSelector_PointerToStruct(t *testing.T) {
 	type S struct{ A int }
 	env := map[string]any{"s": &S{A: 7}}
-	got, err := Eval(t.Context(), "s.A", env)
+	got, err := evalExpr(t.Context(), "s.A", env)
 	require.NoError(t, err)
 	require.Equal(t, 7, got)
 }
@@ -276,20 +276,20 @@ func TestSelector_PointerToStruct(t *testing.T) {
 func TestSelector_NilPointer(t *testing.T) {
 	type S struct{ A int }
 	env := map[string]any{"s": (*S)(nil)}
-	_, err := Eval(t.Context(), "s.A", env)
+	_, err := evalExpr(t.Context(), "s.A", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestSelector_MapKeyMissing(t *testing.T) {
 	env := map[string]any{"m": map[string]any{"a": 1}}
-	_, err := Eval(t.Context(), "m.b", env)
+	_, err := evalExpr(t.Context(), "m.b", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "not found")
 }
 
 func TestSelector_TypedMapWithStringKey(t *testing.T) {
 	env := map[string]any{"m": map[string]int{"a": 1, "b": 2}}
-	got, err := Eval(t.Context(), "m.a", env)
+	got, err := evalExpr(t.Context(), "m.a", env)
 	require.NoError(t, err)
 	require.Equal(t, 1, got)
 }
@@ -300,18 +300,18 @@ func TestSelector_TypedMapWithStringKey(t *testing.T) {
 func TestCall_MethodOnStructSelector(t *testing.T) {
 	env := map[string]any{"u": testEnv{Count: 21}}
 
-	got, err := Eval(t.Context(), "u.Double()", env)
+	got, err := evalExpr(t.Context(), "u.Double()", env)
 	require.NoError(t, err)
 	require.Equal(t, 42, got)
 
-	got, err = Eval(t.Context(), `u.Greet("world")`, env)
+	got, err = evalExpr(t.Context(), `u.Greet("world")`, env)
 	require.NoError(t, err)
 	require.Equal(t, "Hello, world", got)
 }
 
 func TestCall_MethodOnPointerSelector(t *testing.T) {
 	env := map[string]any{"p": &ptrEnv{Value: 7}}
-	got, err := Eval(t.Context(), "p.Triple()", env)
+	got, err := evalExpr(t.Context(), "p.Triple()", env)
 	require.NoError(t, err)
 	require.Equal(t, 21, got)
 }
@@ -324,21 +324,21 @@ func TestCall_MapStoredFunctionViaSelector(t *testing.T) {
 			"double": func(n int64) int64 { return n * 2 },
 		},
 	}
-	got, err := Eval(t.Context(), "util.double(21)", env)
+	got, err := evalExpr(t.Context(), "util.double(21)", env)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), got)
 }
 
 func TestCall_MethodNotFoundOnSelector(t *testing.T) {
 	env := map[string]any{"u": testEnv{}}
-	_, err := Eval(t.Context(), "u.Nope()", env)
+	_, err := evalExpr(t.Context(), "u.Nope()", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "method")
 }
 
 func TestCall_MethodOnNilPointerSelector(t *testing.T) {
 	env := map[string]any{"p": (*ptrEnv)(nil)}
-	_, err := Eval(t.Context(), "p.Triple()", env)
+	_, err := evalExpr(t.Context(), "p.Triple()", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nil pointer")
 }
@@ -352,7 +352,7 @@ func TestCall_StructFieldFunctionSelector(t *testing.T) {
 	env := map[string]any{
 		"x": Env{Double: func(n int64) int64 { return n * 2 }},
 	}
-	got, err := Eval(t.Context(), "x.Double(21)", env)
+	got, err := evalExpr(t.Context(), "x.Double(21)", env)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), got)
 }
@@ -365,20 +365,20 @@ func TestCall_TypedStringMapFunctionSelector(t *testing.T) {
 			"double": func(n int64) int64 { return n * 2 },
 		},
 	}
-	got, err := Eval(t.Context(), "fns.double(21)", env)
+	got, err := evalExpr(t.Context(), "fns.double(21)", env)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), got)
 }
 
 func TestCall_MapStoredFunctionMissing(t *testing.T) {
 	env := map[string]any{"m": map[string]any{"x": 1}}
-	_, err := Eval(t.Context(), "m.nope()", env)
+	_, err := evalExpr(t.Context(), "m.nope()", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "not found")
 }
 
 func TestCall_OnNilSelectorReceiver(t *testing.T) {
-	_, err := Eval(t.Context(), "nil.f()", nil)
+	_, err := evalExpr(t.Context(), "nil.f()", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "nil")
 }
@@ -389,22 +389,22 @@ func TestCall_UnsupportedCallTarget(t *testing.T) {
 	env := map[string]any{
 		"fns": []any{func() int64 { return 1 }},
 	}
-	_, err := Eval(t.Context(), "fns[0]()", env)
+	_, err := evalExpr(t.Context(), "fns[0]()", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "call target")
 }
 
 func TestCall_WrongArgCount(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"two": func(a, b int) int { return a + b },
 	})}
-	_, err := Eval(t.Context(), "two(1)", nil, opts...)
+	_, err := evalExpr(t.Context(), "two(1)", nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "expects 2 args")
 }
 
 func TestCall_VariadicMinimumArgs(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"join": func(sep string, parts ...string) string {
 			out := ""
 			for i, p := range parts {
@@ -417,50 +417,50 @@ func TestCall_VariadicMinimumArgs(t *testing.T) {
 		},
 	})}
 	// Zero variadic args is allowed.
-	got, err := Eval(t.Context(), `join(",")`, nil, opts...)
+	got, err := evalExpr(t.Context(), `join(",")`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "", got)
 
-	got, err = Eval(t.Context(), `join(",", "a", "b", "c")`, nil, opts...)
+	got, err = evalExpr(t.Context(), `join(",", "a", "b", "c")`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "a,b,c", got)
 
 	// Fewer than the fixed count errors.
-	_, err = Eval(t.Context(), `join()`, nil, opts...)
+	_, err = evalExpr(t.Context(), `join()`, nil, opts...)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "at least")
 }
 
 func TestCall_UnknownFunction(t *testing.T) {
-	_, err := Eval(t.Context(), "nope()", nil)
+	_, err := evalExpr(t.Context(), "nope()", nil)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "unknown function")
 }
 
 func TestCall_TooManyReturns(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"three": func() (int, int, int) { return 1, 2, 3 },
 	})}
-	_, err := Eval(t.Context(), "three()", nil, opts...)
+	_, err := evalExpr(t.Context(), "three()", nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "returns")
 }
 
 func TestCall_SecondReturnNotError(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"bad": func() (int, string) { return 1, "x" },
 	})}
-	_, err := Eval(t.Context(), "bad()", nil, opts...)
+	_, err := evalExpr(t.Context(), "bad()", nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "second return must be error")
 }
 
 func TestCall_ZeroReturn(t *testing.T) {
 	called := false
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"noop": func() { called = true },
 	})}
-	got, err := Eval(t.Context(), "noop()", nil, opts...)
+	got, err := evalExpr(t.Context(), "noop()", nil, opts...)
 	require.NoError(t, err)
 	require.Nil(t, got)
 	require.True(t, called)
@@ -469,7 +469,7 @@ func TestCall_ZeroReturn(t *testing.T) {
 func TestCall_NonFunction(t *testing.T) {
 	// Identifier that resolves to a non-function value via env, then called.
 	env := map[string]any{"notfn": 42}
-	_, err := Eval(t.Context(), "notfn()", env)
+	_, err := evalExpr(t.Context(), "notfn()", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "not a function")
 }
@@ -479,55 +479,55 @@ func TestCall_NonFunction(t *testing.T) {
 func TestCall_NumericCoercion(t *testing.T) {
 	// expr stores ints as int64; functions declared with int/int32/etc.
 	// should still accept them via convertArg's numeric coercion.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n + 1 },
 		"f32": func(f float32) float32 { return f * 2 },
 	})}
 
-	got, err := Eval(t.Context(), "i8(10)", nil, opts...)
+	got, err := evalExpr(t.Context(), "i8(10)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(11), got)
 
-	got, err = Eval(t.Context(), "f32(1.5)", nil, opts...)
+	got, err = evalExpr(t.Context(), "f32(1.5)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, float32(3.0), got)
 }
 
 func TestCall_NilToNilableParam(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"takesSlice": func(s []int) int { return len(s) },
 		"takesMap":   func(m map[string]int) int { return len(m) },
 	})}
 
-	got, err := Eval(t.Context(), "takesSlice(nil)", nil, opts...)
+	got, err := evalExpr(t.Context(), "takesSlice(nil)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 0, got)
 
-	got, err = Eval(t.Context(), "takesMap(nil)", nil, opts...)
+	got, err = evalExpr(t.Context(), "takesMap(nil)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 0, got)
 }
 
 func TestCall_NilToNonNilableParamFails(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"takesInt": func(n int) int { return n },
 	})}
-	_, err := Eval(t.Context(), "takesInt(nil)", nil, opts...)
+	_, err := evalExpr(t.Context(), "takesInt(nil)", nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "cannot pass nil")
 }
 
 func TestCall_WrongArgType(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"takesMap": func(m map[string]int) int { return len(m) },
 	})}
-	_, err := Eval(t.Context(), `takesMap("not-a-map")`, nil, opts...)
+	_, err := evalExpr(t.Context(), `takesMap("not-a-map")`, nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestCall_InterfaceParam(t *testing.T) {
 	// A param of type `any` should accept anything.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"dump": func(v any) string {
 			if v == nil {
 				return "nil"
@@ -535,21 +535,21 @@ func TestCall_InterfaceParam(t *testing.T) {
 			return "ok"
 		},
 	})}
-	got, err := Eval(t.Context(), "dump(42)", nil, opts...)
+	got, err := evalExpr(t.Context(), "dump(42)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "ok", got)
 
-	got, err = Eval(t.Context(), "dump(nil)", nil, opts...)
+	got, err = evalExpr(t.Context(), "dump(nil)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "nil", got)
 }
 
 // --- Builtins: fill coverage and document sharp edges ---
 // Compile/Eval with no options do not preload the standard builtin set,
-// so each test here passes WithBuiltins as a CompileOption.
+// so each test here passes WithBuiltins as a Option.
 
 func TestBuiltin_Len(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	cases := []struct {
 		expr string
 		env  map[string]any
@@ -562,7 +562,7 @@ func TestBuiltin_Len(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, tc.env, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, tc.env, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -570,22 +570,22 @@ func TestBuiltin_Len(t *testing.T) {
 }
 
 func TestBuiltin_LenUnsupported(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), "len(n)", map[string]any{"n": 42}, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), "len(n)", map[string]any{"n": 42}, opts...)
 	require.Error(t, err)
 }
 
 // `len` counts runes (Unicode code points) for strings, not raw bytes, so
 // indexing and length are consistent for non-ASCII strings.
 func TestBuiltin_LenCountsRunes(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	got, err := Eval(t.Context(), `len("héllo")`, nil, opts...)
+	opts := []Option{WithBuiltins()}
+	got, err := evalExpr(t.Context(), `len("héllo")`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 5, got)
 }
 
 func TestBuiltin_String(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	cases := []struct {
 		expr string
 		want string
@@ -598,7 +598,7 @@ func TestBuiltin_String(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -606,7 +606,7 @@ func TestBuiltin_String(t *testing.T) {
 }
 
 func TestBuiltin_Int(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	cases := []struct {
 		expr string
 		want int64
@@ -619,7 +619,7 @@ func TestBuiltin_Int(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -629,28 +629,28 @@ func TestBuiltin_Int(t *testing.T) {
 // `int` uses strict base-10 parsing, so trailing garbage and non-integer
 // forms error instead of silently producing a truncated value.
 func TestBuiltin_IntStringStrict(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	for _, expr := range []string{`int("42abc")`, `int("3.14")`, `int("0xff")`} {
-		_, err := Eval(t.Context(), expr, nil, opts...)
+		_, err := evalExpr(t.Context(), expr, nil, opts...)
 		require.Error(t, err, expr)
 		require.Contains(t, err.Error(), "cannot parse", expr)
 	}
 }
 
 func TestBuiltin_IntStringInvalid(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), `int("nope")`, nil, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), `int("nope")`, nil, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_IntUnsupported(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), "int(x)", map[string]any{"x": []any{1}}, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), "int(x)", map[string]any{"x": []any{1}}, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_Float(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	cases := []struct {
 		expr string
 		want float64
@@ -662,7 +662,7 @@ func TestBuiltin_Float(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -671,28 +671,28 @@ func TestBuiltin_Float(t *testing.T) {
 
 // `float` uses strict parsing so trailing garbage fails loudly.
 func TestBuiltin_FloatStringStrict(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	for _, expr := range []string{`float("3.14xyz")`, `float("")`} {
-		_, err := Eval(t.Context(), expr, nil, opts...)
+		_, err := evalExpr(t.Context(), expr, nil, opts...)
 		require.Error(t, err, expr)
 		require.Contains(t, err.Error(), "cannot parse", expr)
 	}
 }
 
 func TestBuiltin_FloatStringInvalid(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), `float("nope")`, nil, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), `float("nope")`, nil, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_FloatUnsupported(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), "float(x)", map[string]any{"x": []any{1}}, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), "float(x)", map[string]any{"x": []any{1}}, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_Bool(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	cases := []struct {
 		expr string
 		want bool
@@ -705,7 +705,7 @@ func TestBuiltin_Bool(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -713,8 +713,8 @@ func TestBuiltin_Bool(t *testing.T) {
 }
 
 func TestBuiltin_Contains_Nil(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	got, err := Eval(t.Context(), "contains(nil, 1)", nil, opts...)
+	opts := []Option{WithBuiltins()}
+	got, err := evalExpr(t.Context(), "contains(nil, 1)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
@@ -722,77 +722,77 @@ func TestBuiltin_Contains_Nil(t *testing.T) {
 // Documents that `contains` uses looseEqual, so a float needle matches an
 // int element and vice versa. Probably a feature, but worth pinning.
 func TestBuiltin_Contains_NumericLoose(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{"xs": []any{1, 2, 3}}
-	got, err := Eval(t.Context(), "contains(xs, 1.0)", env, opts...)
+	got, err := evalExpr(t.Context(), "contains(xs, 1.0)", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 }
 
 func TestBuiltin_Contains_StringNeedleWrongType(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), `contains("hello", 1)`, nil, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), `contains("hello", 1)`, nil, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_Contains_UnsupportedHaystack(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{"x": 42}
-	_, err := Eval(t.Context(), "contains(x, 1)", env, opts...)
+	_, err := evalExpr(t.Context(), "contains(x, 1)", env, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_Contains_MapNonStringKeyErrors(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{"m": map[int]int{1: 1}}
-	_, err := Eval(t.Context(), "contains(m, 1)", env, opts...)
+	_, err := evalExpr(t.Context(), "contains(m, 1)", env, opts...)
 	require.Error(t, err)
 }
 
 // `has` is narrowed to maps with string keys; checking slice membership
 // is `contains`'s job. This keeps the two functions clearly distinct.
 func TestBuiltin_Has_MapsOnly(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{
 		"tags": map[string]any{"red": true, "blue": false},
 	}
-	got, err := Eval(t.Context(), `has(tags, "red")`, env, opts...)
+	got, err := evalExpr(t.Context(), `has(tags, "red")`, env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 
-	got, err = Eval(t.Context(), `has(tags, "green")`, env, opts...)
+	got, err = evalExpr(t.Context(), `has(tags, "green")`, env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 
 	// Slices are not a valid haystack for has.
 	env = map[string]any{"xs": []any{"a", "b"}}
-	_, err = Eval(t.Context(), `has(xs, "a")`, env, opts...)
+	_, err = evalExpr(t.Context(), `has(xs, "a")`, env, opts...)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected map")
 
 	// Nil is permitted and returns false without erroring.
-	got, err = Eval(t.Context(), "has(nil, \"k\")", nil, opts...)
+	got, err = evalExpr(t.Context(), "has(nil, \"k\")", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
 
 func TestBuiltin_Keys_Nil(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	got, err := Eval(t.Context(), "keys(nil)", nil, opts...)
+	opts := []Option{WithBuiltins()}
+	got, err := evalExpr(t.Context(), "keys(nil)", nil, opts...)
 	require.NoError(t, err)
 	require.Nil(t, got)
 }
 
 func TestBuiltin_Keys_NonMapErrors(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
-	_, err := Eval(t.Context(), "keys(x)", map[string]any{"x": 42}, opts...)
+	opts := []Option{WithBuiltins()}
+	_, err := evalExpr(t.Context(), "keys(x)", map[string]any{"x": 42}, opts...)
 	require.Error(t, err)
 }
 
 func TestBuiltin_Keys_TypedMap(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{"m": map[string]int{"b": 2, "a": 1}}
-	got, err := Eval(t.Context(), "keys(m)", env, opts...)
+	got, err := evalExpr(t.Context(), "keys(m)", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, []any{"a", "b"}, got)
 }
@@ -854,10 +854,10 @@ func (c customErr) Error() string { return c.msg }
 
 func TestCall_CustomErrorTypePropagates(t *testing.T) {
 	sentinel := customErr{msg: "boom"}
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"fail": func() (int, error) { return 0, sentinel },
 	})}
-	_, err := Eval(t.Context(), "fail()", nil, opts...)
+	_, err := evalExpr(t.Context(), "fail()", nil, opts...)
 	require.Error(t, err)
 	var ce customErr
 	require.True(t, errors.As(err, &ce))
@@ -868,7 +868,7 @@ func TestCall_CustomErrorTypePropagates(t *testing.T) {
 
 func TestLookup_NilPointerEnv(t *testing.T) {
 	var p *ptrEnv
-	_, err := Eval(t.Context(), "Value", p)
+	_, err := evalExpr(t.Context(), "Value", p)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "undefined")
 }

@@ -33,7 +33,7 @@ func TestToInt64_AllIntegerKinds(t *testing.T) {
 	for name, value := range cases {
 		t.Run(name, func(t *testing.T) {
 			// `+` of integer and int64(0) forces the value through toInt64.
-			got, err := Eval(t.Context(), name+" + 0", map[string]any{name: value})
+			got, err := evalExpr(t.Context(), name+" + 0", map[string]any{name: value})
 			require.NoError(t, err)
 			require.Equal(t, int64(toInt64OrPanic(value)), got)
 		})
@@ -52,7 +52,7 @@ func toInt64OrPanic(v any) int64 {
 
 func TestToFloat64_Float32Source(t *testing.T) {
 	// float32 in env must add correctly.
-	got, err := Eval(t.Context(), "v + 1.5", map[string]any{"v": float32(2.5)})
+	got, err := evalExpr(t.Context(), "v + 1.5", map[string]any{"v": float32(2.5)})
 	require.NoError(t, err)
 	require.InDelta(t, 4.0, got.(float64), 1e-9)
 }
@@ -69,7 +69,7 @@ func TestIsNilValue_AllNilableKinds(t *testing.T) {
 	}
 	for name, v := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := Eval(t.Context(), "x == nil", map[string]any{"x": v})
+			got, err := evalExpr(t.Context(), "x == nil", map[string]any{"x": v})
 			require.NoError(t, err)
 			require.Equal(t, true, got)
 		})
@@ -82,7 +82,7 @@ func TestLooseEqual_ComparableDifferentTypes(t *testing.T) {
 	type A struct{ X int }
 	type B struct{ X int }
 	env := map[string]any{"a": A{X: 1}, "b": B{X: 1}}
-	got, err := Eval(t.Context(), "a == b", env)
+	got, err := evalExpr(t.Context(), "a == b", env)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
@@ -94,10 +94,10 @@ type stringer struct{ s string }
 func (s stringer) String() string { return s.s }
 
 func TestConvertArg_InterfaceImplements(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"toStr": func(s interface{ String() string }) string { return s.String() },
 	})}
-	got, err := Eval(t.Context(), "toStr(v)", map[string]any{"v": stringer{s: "hi"}}, opts...)
+	got, err := evalExpr(t.Context(), "toStr(v)", map[string]any{"v": stringer{s: "hi"}}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "hi", got)
 }
@@ -105,7 +105,7 @@ func TestConvertArg_InterfaceImplements(t *testing.T) {
 // --- intToKind: all target kinds ---
 
 func TestIntToKind_AllTargets(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i":    func(n int) int { return n },
 		"i8":   func(n int8) int8 { return n },
 		"i16":  func(n int16) int16 { return n },
@@ -140,7 +140,7 @@ func TestIntToKind_AllTargets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil, opts...)
+			got, err := evalExpr(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -150,14 +150,14 @@ func TestIntToKind_AllTargets(t *testing.T) {
 // --- intToKind: every negative→unsigned rejection path ---
 
 func TestIntToKind_NegativeToUnsignedRejected(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"u":    func(n uint) uint { return n },
 		"u64":  func(n uint64) uint64 { return n },
 		"uptr": func(n uintptr) uintptr { return n },
 	})}
 	for _, expr := range []string{"u(-1)", "u64(-1)", "uptr(-1)"} {
 		t.Run(expr, func(t *testing.T) {
-			_, err := Eval(t.Context(), expr, nil, opts...)
+			_, err := evalExpr(t.Context(), expr, nil, opts...)
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrEvaluate)
 		})
@@ -167,7 +167,7 @@ func TestIntToKind_NegativeToUnsignedRejected(t *testing.T) {
 // --- safeNumericConvert: uint source, uint target (hits uintToKind) ---
 
 func TestSafeNumericConvert_UintToUint(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"u":    func(n uint) uint { return n },
 		"u8":   func(n uint8) uint8 { return n },
 		"u16":  func(n uint16) uint16 { return n },
@@ -177,47 +177,47 @@ func TestSafeNumericConvert_UintToUint(t *testing.T) {
 	})}
 	// A uint32 value in env narrows to uint8 via uintToKind.
 	env := map[string]any{"v": uint32(200)}
-	got, err := Eval(t.Context(), "u8(v)", env, opts...)
+	got, err := evalExpr(t.Context(), "u8(v)", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, uint8(200), got)
 
 	// uint32 → uint16 also
 	env = map[string]any{"v": uint32(60000)}
-	got, err = Eval(t.Context(), "u16(v)", env, opts...)
+	got, err = evalExpr(t.Context(), "u16(v)", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, uint16(60000), got)
 
 	// uint32(5) → uint, uint64, uintptr all widen cleanly
 	env = map[string]any{"v": uint32(5)}
 	for _, expr := range []string{"u(v)", "u64(v)", "uptr(v)"} {
-		_, err := Eval(t.Context(), expr, env, opts...)
+		_, err := evalExpr(t.Context(), expr, env, opts...)
 		require.NoError(t, err, expr)
 	}
 
 	// uint64 → uint32 overflow rejected
 	env = map[string]any{"v": uint64(math.MaxUint32) + 1}
-	_, err = Eval(t.Context(), "u32(v)", env, opts...)
+	_, err = evalExpr(t.Context(), "u32(v)", env, opts...)
 	require.Error(t, err)
 
 	// uint32 → uint8 overflow rejected
 	env = map[string]any{"v": uint32(300)}
-	_, err = Eval(t.Context(), "u8(v)", env, opts...)
+	_, err = evalExpr(t.Context(), "u8(v)", env, opts...)
 	require.Error(t, err)
 
 	// uint64 → uint16 overflow rejected
 	env = map[string]any{"v": uint64(70000)}
-	_, err = Eval(t.Context(), "u16(v)", env, opts...)
+	_, err = evalExpr(t.Context(), "u16(v)", env, opts...)
 	require.Error(t, err)
 }
 
 // --- safeNumericConvert: uint source > MaxInt64 to signed target ---
 
 func TestSafeNumericConvert_HugeUintToSignedRejected(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i64": func(n int64) int64 { return n },
 	})}
 	env := map[string]any{"v": uint64(math.MaxUint64)}
-	_, err := Eval(t.Context(), "i64(v)", env, opts...)
+	_, err := evalExpr(t.Context(), "i64(v)", env, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -226,7 +226,7 @@ func TestSafeNumericConvert_HugeUintToSignedRejected(t *testing.T) {
 
 func TestLookupEnv_UnsupportedEnvKind(t *testing.T) {
 	// env is an int — no identifiers reachable. Must not panic.
-	_, err := Eval(t.Context(), "x", 42)
+	_, err := evalExpr(t.Context(), "x", 42)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -235,7 +235,7 @@ func TestLookupEnv_UnsupportedEnvKind(t *testing.T) {
 
 func TestSelectField_UnsupportedReceiver(t *testing.T) {
 	env := map[string]any{"x": 42}
-	_, err := Eval(t.Context(), "x.field", env)
+	_, err := evalExpr(t.Context(), "x.field", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "cannot select")
@@ -247,7 +247,7 @@ func TestResolveMethod_MapNonStringKey(t *testing.T) {
 	// A typed map with int keys exposes no methods; attempting to call
 	// an entry via selector falls through resolveMethod and errors.
 	env := map[string]any{"m": map[int]func() int{1: func() int { return 1 }}}
-	_, err := Eval(t.Context(), "m.x()", env)
+	_, err := evalExpr(t.Context(), "m.x()", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -255,11 +255,11 @@ func TestResolveMethod_MapNonStringKey(t *testing.T) {
 // --- Builtin: len(chan) ---
 
 func TestBuiltin_LenChan(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	ch := make(chan int, 3)
 	ch <- 1
 	ch <- 2
-	got, err := Eval(t.Context(), "len(c)", map[string]any{"c": ch}, opts...)
+	got, err := evalExpr(t.Context(), "len(c)", map[string]any{"c": ch}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 2, got)
 }
@@ -269,7 +269,7 @@ func TestBuiltin_LenChan(t *testing.T) {
 func TestEvalUnary_UnsupportedOperator(t *testing.T) {
 	// go/parser accepts ^x as a unary expression, but evalUnary only
 	// implements !, -, + — so it must reject with ErrEvaluate.
-	_, err := Eval(t.Context(), "^1", nil)
+	_, err := evalExpr(t.Context(), "^1", nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -278,7 +278,7 @@ func TestEvalUnary_UnsupportedOperator(t *testing.T) {
 
 func TestLookupEnv_TypedMapWithNonStringKey(t *testing.T) {
 	// Env is map[int]int — reflect.Map path checks key kind and skips it.
-	_, err := Eval(t.Context(), "x", map[int]int{1: 1})
+	_, err := evalExpr(t.Context(), "x", map[int]int{1: 1})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -288,10 +288,10 @@ func TestLookupEnv_TypedMapWithNonStringKey(t *testing.T) {
 func TestConvertArg_ConvertibleTo(t *testing.T) {
 	// A named string type parameter accepts a plain string via Convert.
 	type MyStr string
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"take": func(s MyStr) string { return string(s) },
 	})}
-	got, err := Eval(t.Context(), `take("hi")`, nil, opts...)
+	got, err := evalExpr(t.Context(), `take("hi")`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "hi", got)
 }
@@ -300,10 +300,10 @@ func TestConvertArg_ConvertibleTo(t *testing.T) {
 // Already covered by TestCall_VariadicMinimumArgs, but pin the branch
 // where fixed > 0 and len(args) < fixed to be explicit.
 func TestBuildCallArgs_VariadicBelowFixed(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"f": func(a, b int, rest ...int) int { return a + b },
 	})}
-	_, err := Eval(t.Context(), "f(1)", nil, opts...)
+	_, err := evalExpr(t.Context(), "f(1)", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -312,7 +312,7 @@ func TestBuildCallArgs_VariadicBelowFixed(t *testing.T) {
 
 func TestApplyBinary_IncompatibleTypes(t *testing.T) {
 	env := map[string]any{"s": []any{1}, "m": map[string]any{"k": 1}}
-	_, err := Eval(t.Context(), "s + m", env)
+	_, err := evalExpr(t.Context(), "s + m", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -324,7 +324,7 @@ func TestResolveMethod_NilReceiverDirect(t *testing.T) {
 	// of resolveMethod when the value is literally nil (not just a nil
 	// pointer).
 	env := map[string]any{"v": nil}
-	_, err := Eval(t.Context(), "v.f()", env)
+	_, err := evalExpr(t.Context(), "v.f()", env)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -345,7 +345,7 @@ func TestApplyBinary_StringComparators(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil)
+			got, err := evalExpr(t.Context(), tc.expr, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -367,7 +367,7 @@ func TestApplyBinary_FloatOps(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.expr, nil)
+			got, err := evalExpr(t.Context(), tc.expr, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -380,11 +380,11 @@ func TestEvalIdent_FunctionValue(t *testing.T) {
 	// A bare identifier referring to a builtin returns the function
 	// value, so you can pass it to another function. We verify by using
 	// it as a variadic arg via a custom engine.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"myFn": func() int { return 7 },
 		"call": func(fn func() int) int { return fn() },
 	})}
-	got, err := Eval(t.Context(), "call(myFn)", nil, opts...)
+	got, err := evalExpr(t.Context(), "call(myFn)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 7, got)
 }
@@ -395,7 +395,7 @@ func TestLookupEnv_TypedStringMap(t *testing.T) {
 	// env is map[string]int directly — not a map[string]any. Triggers
 	// the reflect.Map branch in lookupEnv.
 	env := map[string]int{"x": 7}
-	got, err := Eval(t.Context(), "x", env)
+	got, err := evalExpr(t.Context(), "x", env)
 	require.NoError(t, err)
 	require.Equal(t, 7, got)
 }
@@ -405,22 +405,22 @@ func TestLookupEnv_TypedStringMap(t *testing.T) {
 func TestBuiltin_ContainsMapKeyPresent(t *testing.T) {
 	// A typed map (not map[string]any) falls through to the reflect
 	// path, which checks key presence.
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{"m": map[string]int{"a": 1, "b": 2}}
-	got, err := Eval(t.Context(), `contains(m, "a")`, env, opts...)
+	got, err := evalExpr(t.Context(), `contains(m, "a")`, env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 
-	_, err = Eval(t.Context(), `contains(m, 1)`, env, opts...)
+	_, err = evalExpr(t.Context(), `contains(m, 1)`, env, opts...)
 	require.Error(t, err)
 }
 
 // --- has: map with non-string keys and wrong key type ---
 
 func TestBuiltin_HasMapKeyKindWrong(t *testing.T) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	env := map[string]any{"m": map[int]int{1: 1}}
-	_, err := Eval(t.Context(), `has(m, "x")`, env, opts...)
+	_, err := evalExpr(t.Context(), `has(m, "x")`, env, opts...)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "map key must be string")
 }
@@ -428,22 +428,22 @@ func TestBuiltin_HasMapKeyKindWrong(t *testing.T) {
 func TestBuiltin_HasKeyWrongType(t *testing.T) {
 	// map is map[string]any but key arg evaluates to non-string.
 	// builtin_has uses strict type assert, so int key errors.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"badHas": func(m map[string]any, k any) (bool, error) {
 			return builtinHas(m, k)
 		},
 	})}
-	_, err := Eval(t.Context(), `badHas(m, 1)`, map[string]any{"m": map[string]any{"a": 1}}, opts...)
+	_, err := evalExpr(t.Context(), `badHas(m, 1)`, map[string]any{"m": map[string]any{"a": 1}}, opts...)
 	require.Error(t, err)
 }
 
 // --- convertArg: fast-path when rv.Type() is AssignableTo want ---
 
 func TestConvertArg_AlreadyAssignable(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"take": func(a any) any { return a },
 	})}
-	got, err := Eval(t.Context(), "take(42)", nil, opts...)
+	got, err := evalExpr(t.Context(), "take(42)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), got)
 }
@@ -452,7 +452,7 @@ func TestConvertArg_AlreadyAssignable(t *testing.T) {
 
 func TestSelectField_MapNonStringKeys(t *testing.T) {
 	env := map[string]any{"m": map[int]int{1: 1}}
-	_, err := Eval(t.Context(), "m.x", env)
+	_, err := evalExpr(t.Context(), "m.x", env)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "non-string keys")
 }
@@ -461,7 +461,7 @@ func TestSelectField_MapNonStringKeys(t *testing.T) {
 
 func TestSelectField_TypedMapMissingKey(t *testing.T) {
 	env := map[string]any{"m": map[string]int{"a": 1}}
-	_, err := Eval(t.Context(), "m.b", env)
+	_, err := evalExpr(t.Context(), "m.b", env)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
 }
@@ -478,7 +478,7 @@ func TestResolveMethod_PointerElemFallback(t *testing.T) {
 	// succeeds.
 	d := deepStruct{N: 3}
 	env := map[string]any{"d": &d}
-	got, err := Eval(t.Context(), "d.Bump()", env)
+	got, err := evalExpr(t.Context(), "d.Bump()", env)
 	require.NoError(t, err)
 	require.Equal(t, 4, got)
 }
@@ -487,12 +487,12 @@ func TestResolveMethod_PointerElemFallback(t *testing.T) {
 
 func TestLooseEqual_NilOnLeft(t *testing.T) {
 	env := map[string]any{"s": []any(nil)}
-	got, err := Eval(t.Context(), "nil == s", env)
+	got, err := evalExpr(t.Context(), "nil == s", env)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 
 	env = map[string]any{"s": []any{1}}
-	got, err = Eval(t.Context(), "nil == s", env)
+	got, err = evalExpr(t.Context(), "nil == s", env)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
@@ -502,7 +502,7 @@ func TestLooseEqual_NilOnLeft(t *testing.T) {
 func TestLooseEqual_SameTypeEqual(t *testing.T) {
 	type K struct{ A int }
 	env := map[string]any{"a": K{A: 1}, "b": K{A: 1}}
-	got, err := Eval(t.Context(), "a == b", env)
+	got, err := evalExpr(t.Context(), "a == b", env)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 }
@@ -511,17 +511,17 @@ func TestLooseEqual_SameTypeEqual(t *testing.T) {
 
 func TestLooseEqual_UncomparableLHS(t *testing.T) {
 	env := map[string]any{"s": []int{1}, "i": 2}
-	_, err := Eval(t.Context(), "s == i", env)
+	_, err := evalExpr(t.Context(), "s == i", env)
 	require.Error(t, err)
 }
 
 // --- safeNumericConvert: float to int16 out-of-range ---
 
 func TestSafeNumericConvert_FloatNarrowingRejected(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"i16": func(n int16) int16 { return n },
 	})}
-	_, err := Eval(t.Context(), "i16(100000.0)", nil, opts...)
+	_, err := evalExpr(t.Context(), "i16(100000.0)", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
@@ -540,7 +540,7 @@ func TestIsNilValue_Direct(t *testing.T) {
 
 func TestApplyBinary_NilComparisonShortcircuit(t *testing.T) {
 	// lhs nil, rhs non-nilable int: looseEqual rhs path and return false
-	got, err := Eval(t.Context(), "nil == 42", nil)
+	got, err := evalExpr(t.Context(), "nil == 42", nil)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 }
@@ -549,54 +549,54 @@ func TestApplyBinary_NilComparisonShortcircuit(t *testing.T) {
 
 func TestEvalBinary_LandErrorsOnRHS(t *testing.T) {
 	// lhs is truthy, so rhs must evaluate and can fail.
-	_, err := Eval(t.Context(), "true && nosuch", nil)
+	_, err := evalExpr(t.Context(), "true && nosuch", nil)
 	require.Error(t, err)
 }
 
 func TestEvalBinary_LandErrorsOnLHS(t *testing.T) {
-	_, err := Eval(t.Context(), "nosuch && true", nil)
+	_, err := evalExpr(t.Context(), "nosuch && true", nil)
 	require.Error(t, err)
 }
 
 func TestEvalBinary_LorErrorsOnLHS(t *testing.T) {
-	_, err := Eval(t.Context(), "nosuch || true", nil)
+	_, err := evalExpr(t.Context(), "nosuch || true", nil)
 	require.Error(t, err)
 }
 
 func TestEvalBinary_LorErrorsOnRHS(t *testing.T) {
-	_, err := Eval(t.Context(), "false || nosuch", nil)
+	_, err := evalExpr(t.Context(), "false || nosuch", nil)
 	require.Error(t, err)
 }
 
 func TestEvalBinary_NonLogicalRHSError(t *testing.T) {
-	_, err := Eval(t.Context(), "1 + nosuch", nil)
+	_, err := evalExpr(t.Context(), "1 + nosuch", nil)
 	require.Error(t, err)
 }
 
 // --- evalIndex: rejections on err paths ---
 
 func TestEvalIndex_RecvError(t *testing.T) {
-	_, err := Eval(t.Context(), "nosuch[0]", nil)
+	_, err := evalExpr(t.Context(), "nosuch[0]", nil)
 	require.Error(t, err)
 }
 
 func TestEvalIndex_IdxError(t *testing.T) {
 	env := map[string]any{"s": []any{1, 2, 3}}
-	_, err := Eval(t.Context(), "s[nosuch]", env)
+	_, err := evalExpr(t.Context(), "s[nosuch]", env)
 	require.Error(t, err)
 }
 
 // --- evalCall: arg eval error ---
 
 func TestEvalCall_ArgError(t *testing.T) {
-	_, err := Eval(t.Context(), "len(nosuch)", nil)
+	_, err := evalExpr(t.Context(), "len(nosuch)", nil)
 	require.Error(t, err)
 }
 
 // --- resolveCallable: err from selector expression ---
 
 func TestResolveCallable_SelectorError(t *testing.T) {
-	_, err := Eval(t.Context(), "nosuch.f()", nil)
+	_, err := evalExpr(t.Context(), "nosuch.f()", nil)
 	require.Error(t, err)
 }
 
@@ -608,7 +608,7 @@ type fnHolder struct {
 
 func TestResolveMethod_StructFieldFunction(t *testing.T) {
 	env := map[string]any{"h": fnHolder{F: func() int { return 9 }}}
-	got, err := Eval(t.Context(), "h.F()", env)
+	got, err := evalExpr(t.Context(), "h.F()", env)
 	require.NoError(t, err)
 	require.Equal(t, 9, got)
 }
@@ -616,7 +616,7 @@ func TestResolveMethod_StructFieldFunction(t *testing.T) {
 // --- buildCallArgs: convertArg error inside variadic ---
 
 func TestBuildCallArgs_VariadicBadArg(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"sum": func(xs ...int) int {
 			s := 0
 			for _, x := range xs {
@@ -626,24 +626,24 @@ func TestBuildCallArgs_VariadicBadArg(t *testing.T) {
 		},
 	})}
 	// Can't convert a slice to int → error on a variadic position.
-	_, err := Eval(t.Context(), "sum(s)", map[string]any{"s": []int{1}}, opts...)
+	_, err := evalExpr(t.Context(), "sum(s)", map[string]any{"s": []int{1}}, opts...)
 	require.Error(t, err)
 }
 
 func TestBuildCallArgs_BadFixedArg(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"sum": func(a int, rest ...int) int { return a },
 	})}
 	// First fixed arg of a variadic function also goes through convertArg;
 	// a slice-typed value can't coerce to int.
-	_, err := Eval(t.Context(), "sum(s, 1)", map[string]any{"s": []int{1}}, opts...)
+	_, err := evalExpr(t.Context(), "sum(s, 1)", map[string]any{"s": []int{1}}, opts...)
 	require.Error(t, err)
 }
 
 // --- Package-level Eval with compile error ---
 
 func TestPackageEval_CompileError(t *testing.T) {
-	_, err := Eval(t.Context(), "1 + + +", nil)
+	_, err := evalExpr(t.Context(), "1 + + +", nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCompile)
 }
