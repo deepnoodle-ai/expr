@@ -119,7 +119,7 @@ func WithFunctions(funcs map[string]any) Option {
 //
 // Functions are registered via Options and baked into the returned
 // Program. JSON-style array and object literals ([1, 2, 3], {"k": v}) are
-// always accepted; see docs/SPEC.md for the exact rules.
+// always accepted; see docs/reference/spec.md for the exact rules.
 func Compile(code string, opts ...Option) (*Program, error) {
 	if len(code) > MaxSourceLength {
 		return nil, fmt.Errorf("%w: source length %d exceeds maximum %d",

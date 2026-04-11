@@ -1,0 +1,278 @@
+# expr
+
+> `deepnoodle/expr` is a small, zero-dependency expression language for Go
+> programs. It compiles a line of Go-flavoured expression syntax once and
+> evaluates it repeatedly against any env (map, struct, or pointer to
+> struct). It is intended for embedding conditions, templates, and
+> parameter interpolation inside a larger Go program — not as a general
+> scripting language.
+
+This file is a condensed reference aimed at LLM context windows. Human
+readers should start with [`README.md`](README.md); the authoritative
+language reference is [`docs/reference/spec.md`](docs/reference/spec.md).
+
+## Mental model
+
+- **Expressions only.** No statements, no `:=`, no `if`/`for`, no blocks,
+  no function definitions. An expression takes an environment and
+  produces a value.
+- **Parsed by `go/parser.ParseExpr`.** The accepted grammar is a strict
+  subset of Go expression syntax, with two ergonomic extensions: bare
+  `[...]` becomes `[]any{...}` and bare `{"k": v}` becomes
+  `map[string]any{"k": v}`.
+- **Walked, not compiled.** expr visits the `ast.Expr` directly. There is
+  no bytecode, no VM, no optimizer. This is deliberate — the whole
+  library is ~3.9k non-test Go LOC.
+- **Safe by default.** `MaxSourceLength` (64 KiB) caps the parser;
+  `MaxEvalDepth` (256) caps the evaluator. Bitwise ops, pointer ops,
+  channel ops, spread args, type assertions, and function literals
+  are all rejected at eval time.
+- **Loosely typed at runtime.** Integers are `int64`, floats are
+  `float64`, numeric comparisons mix freely, and truthiness covers
+  nil/false/zero/empty-string/empty-collection.
+
+## Installing
+
+```sh
+go get github.com/deepnoodle-ai/expr
+```
+
+## Minimal program
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/deepnoodle-ai/expr"
+)
+
+func main() {
+    p, err := expr.Compile(
+        `user.age >= 18 && contains(user.roles, "admin")`,
+        expr.WithBuiltins(),
+    )
+    if err != nil {
+        panic(err)
+    }
+
+    env := map[string]any{
+        "user": map[string]any{
+            "age":   36,
+            "roles": []any{"admin", "editor"},
+        },
+    }
+
+    v, err := p.Run(context.Background(), env)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(v) // true
+}
+```
+
+`Compile` parses once. The returned `*Program` is immutable and safe to
+share between goroutines. `Run` takes a `context.Context` and the env.
+
+## Options
+
+Options are applied in order; later options override earlier ones for
+any shared name.
+
+| Option                                | Effect                                                     |
+| ------------------------------------- | ---------------------------------------------------------- |
+| `expr.WithBuiltins()`                 | Registers the standard builtin function set (see below)   |
+| `expr.WithFunctions(map[string]any{})`| Registers arbitrary Go functions as callable identifiers   |
+
+Builtins are opt-in: if you don't pass `WithBuiltins`, the only callable
+names are the higher-order forms (always registered) and anything you
+registered yourself. This keeps the sandbox surface as narrow as you want.
+
+## Builtin functions (opt in via `WithBuiltins()`)
+
+| Name              | Signature                      | Notes                                                     |
+| ----------------- | ------------------------------ | --------------------------------------------------------- |
+| `len(v)`          | `(any) -> int`                 | Runes for strings; elements for slice/array/map/chan      |
+| `string(v)`       | `(any) -> string`              | Passthrough; `fmt.Sprintf("%v", v)` otherwise             |
+| `int(v)`          | `(any) -> int64`               | Truncates floats; strict base-10 parse for strings        |
+| `float(v)`        | `(any) -> float64`             | `strconv.ParseFloat` 64-bit for strings                   |
+| `bool(v)`         | `(any) -> bool`                | Same rules as truthiness                                  |
+| `contains(h, n)`  | `(any, any) -> bool`           | Substring, element, or map-key presence                   |
+| `has(m, k)`       | `(any, string) -> bool`        | Key presence on a map (nil → false)                       |
+| `keys(m)`         | `(any) -> []any`               | Sorted string keys                                         |
+| `upper(s)`        | `(string) -> string`           | `strings.ToUpper`                                          |
+| `lower(s)`        | `(string) -> string`           | `strings.ToLower`                                          |
+| `sprintf(f, ...)` | `(string, ...any) -> string`   | `fmt.Sprintf`                                              |
+
+## Higher-order forms (always registered)
+
+The second argument is a predicate AST that is re-evaluated per element
+with `it` (current element) and `index` (0-based position) in scope.
+These shadow any outer identifier of the same name. `list` must be a
+slice, array, or nil (maps are not iterated — drive with `keys(m)` if
+you need to).
+
+| Form                  | Returns          | Description                                           |
+| --------------------- | ---------------- | ----------------------------------------------------- |
+| `map(list, expr)`     | `[]any`          | Transform every element                               |
+| `filter(list, pred)`  | `[]any`          | Keep elements matching predicate                      |
+| `any(list, pred)`     | `bool`           | True if any match (short-circuits)                    |
+| `all(list, pred)`     | `bool`           | True if all match (empty list → true, short-circuits) |
+| `find(list, pred)`    | element or `nil` | First match or nil                                    |
+| `count(list, pred)`   | `int64`          | Number of matches                                     |
+
+Names can be shadowed by `WithFunctions` or an env entry of the same
+name. The literal token `map` is rewritten to an internal sentinel
+before parsing (Go treats `map` as a keyword), then translated back for
+error messages.
+
+## Custom functions
+
+```go
+p, _ := expr.Compile(`greet(upper(name))`, expr.WithFunctions(map[string]any{
+    "upper": strings.ToUpper,
+    "greet": func(name string) string { return "Hello, " + name + "!" },
+}))
+```
+
+Supported return signatures: `T`, `(T, error)`, and `()`. Anything else
+errors at call time. Variadic functions are supported; spread syntax at
+the call site (`f(xs...)`) is not.
+
+**Automatic context injection.** If the registered function's *first*
+parameter is `context.Context`, expr passes the live `ctx` from `Run`
+automatically. The caller-visible call surface excludes that parameter:
+
+```go
+expr.WithFunctions(map[string]any{
+    "fetch": func(ctx context.Context, url string) (string, error) { ... },
+})
+// called from expr as: fetch("https://...")
+```
+
+## Environment kinds
+
+`env` can be:
+
+- `map[string]any` — identifiers are map keys. Missing keys are
+  **errors**, not zero values.
+- Any other `map[string]T` with string keys — resolved via reflection.
+- Struct — exported field, falling back to zero-arg bound method of
+  the same name. Fields beat methods. Unexported fields are unreachable.
+- Pointer to struct — dereferenced and retried. Nil pointer is an error.
+- `nil` — only functions and higher-order forms resolve.
+
+```go
+p, _ := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins())
+v, _ := p.Run(ctx, order) // struct or *struct with a Subtotal() method
+```
+
+## Templates
+
+```go
+t, _ := expr.NewTemplate(
+    `Hello ${user.name}! You have ${len(user.tasks)} task(s).`,
+    expr.WithBuiltins(),
+)
+out, _ := t.Render(ctx, env)
+```
+
+Each `${...}` is compiled once at construction time and re-evaluated on
+every `Render`. Outside of `${...}` the template text is literal.
+
+## JSON-style literals
+
+Bare `[...]` and `{"k": v}` are rewritten before parsing into
+`[]any{...}` and `map[string]any{"k": v}`. Strings, runes, comments, and
+typed Go composite literals are left alone.
+
+```go
+{"items": [1, 2, 3], "count": 3, "ok": true}
+```
+
+Only `[]any` and `map[string]any` composite shapes are accepted at eval
+time. `[]int{1, 2}`, `[3]int{}`, struct literals, etc. all parse but
+error at run time.
+
+## Multi-line expressions and semicolon insertion
+
+expr reuses Go's parser, which means Go's automatic-semicolon-insertion
+rule applies inside expression source. When an expression is split
+across multiple lines, every continuation line **must end with an
+operator, comma, or opening bracket** — never with an identifier,
+literal, or closing `)` / `]` / `}`. The safe continuations are
+`&&`, `||`, `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`,
+`,`, `(`, `[`, `{`. Multi-line call arguments can use trailing commas.
+See `docs/guides/examples.md` for worked multi-line expressions.
+
+## Loose semantics worth remembering
+
+- **Equality (`==`, `!=`)** is loose: mixed int/float kinds compare as
+  `float64`; typed nil values compare equal to literal `nil`; mismatched
+  types are `false` without error; uncomparable types error.
+- **Arithmetic:** int+int → int64 (wraps on overflow); any float mix →
+  float64; `+` on strings is concatenation. Division/modulo by zero
+  errors, not panics.
+- **Truthiness:** nil, false, zero numbers, empty string, empty
+  slice/array/map, and typed-nil nilable kinds are falsey. Everything
+  else is truthy.
+- **Short-circuit:** `&&` / `||` short-circuit on truthiness. `cond && "msg"`
+  returns the string when cond is true, which is the expr idiom for
+  "emit this value if the condition holds."
+- **String indexing** counts runes, matching `len` on strings.
+- **Selectors and index errors:** missing map keys, missing struct
+  fields, nil selectors, and out-of-bounds indexes all return
+  `ErrEvaluate` — expr never panics on well-formed env input.
+
+## Errors
+
+All parse failures wrap `ErrCompile`. All runtime failures wrap
+`ErrEvaluate`. User function errors returned from `(T, error)` signatures
+are wrapped so `errors.Is` and `errors.As` still find the original cause.
+Unknown identifiers, fields, and keys get a Levenshtein-based
+"did you mean...?" hint drawn from what's actually in scope.
+
+```go
+if errors.Is(err, expr.ErrCompile) { /* ... */ }
+if errors.Is(err, expr.ErrEvaluate) { /* ... */ }
+```
+
+## Cancellation
+
+`Program.Run(ctx, env)` checks `ctx.Err()` before dispatching each AST
+node. A cancelled or expired context causes the next node to return the
+raw `context.Canceled` / `context.DeadlineExceeded` without wrapping, so
+callers can match with `errors.Is`. Registered functions that block on
+I/O should accept a `context.Context` as their first parameter — expr
+injects it automatically.
+
+Go has no way to kill a goroutine, so a registered function that ignores
+its context and blocks forever cannot be interrupted. This is by design;
+expr will not silently leak goroutines to make cancellation look nicer.
+
+## What is *not* supported
+
+These parse but error at eval time, so the "did I use a feature expr
+doesn't have?" answer is always readable:
+
+- Slice expressions (`x[a:b]`, `x[a:b:c]`)
+- Type assertions (`x.(T)`)
+- Bitwise operators (`& | ^ << >> &^`)
+- Pointer/address ops (`*x`, `&x`)
+- Channel ops (`<-ch`, `ch <- v`)
+- Imaginary literals (`1i`)
+- Spread call arguments (`f(xs...)`)
+- Composite literals with any type other than `[]any` or `map[string]any`
+- Function literals (`func() {}`)
+
+## Further reading
+
+- [`docs/reference/spec.md`](docs/reference/spec.md) — authoritative language specification
+- [`docs/guides/examples.md`](docs/guides/examples.md) — worked multi-line examples
+  (JSON shaping, nested higher-order forms, validation bags, templating)
+- [`docs/guides/`](docs/guides/) — deeper guides on registering functions,
+  designing an env, sandboxing, templates, and higher-order patterns
+- [`examples/`](examples/) — runnable Go programs for each pattern in
+  the README and the guides

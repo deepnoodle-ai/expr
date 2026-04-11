@@ -5,6 +5,7 @@
 //	go test -run=^$ -bench=. ./... | go run ./chart [out-dir]
 //
 // Writes bench_run.svg and bench_compile.svg into out-dir (default: cwd).
+// The canonical target is docs/assets/ in the repo root.
 package main
 
 import (
