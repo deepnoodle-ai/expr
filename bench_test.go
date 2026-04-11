@@ -1,94 +1,487 @@
-package expr
+package expr_test
 
-import "testing"
+// These benchmarks mirror the shape and naming of
+// github.com/expr-lang/expr/bench_test.go so that results from the two
+// libraries can be compared directly with `go test -bench=.`. Expressions
+// that rely on features this subset does not support (pipelines,
+// #/#acc placeholders, `1..100` ranges, negative indexing, sort/reduce/
+// min/max/groupBy, a separate VM, etc.) are omitted. The ones that
+// remain use the same env shapes, the same literal data, and the same
+// shape of work as upstream, with `#` rewritten to `it`.
 
-// benchEnv is the environment used by the compile/run benchmarks. It
-// mirrors the kind of env an embedding host typically touches: nested
-// maps, a slice, and a few scalar values.
-func benchEnv() map[string]any {
-	return map[string]any{
-		"state": map[string]any{
-			"counter": int64(10),
-			"limit":   int64(100),
-			"name":    "Alice",
-			"items":   []any{int64(1), int64(2), int64(3), int64(4), int64(5)},
-			"user": map[string]any{
-				"age":    int64(30),
-				"active": true,
-			},
-		},
-		"inputs": map[string]any{
-			"multiplier": int64(3),
-			"prefix":     "user:",
-		},
+import (
+	"context"
+	"testing"
+
+	"github.com/deepnoodle-ai/expr"
+)
+
+// eng is shared across every benchmark so startup cost is not folded
+// into steady-state measurements.
+var eng = expr.New(expr.WithBuiltins())
+
+func Benchmark_expr(b *testing.B) {
+	params := map[string]any{
+		"Origin":  "MOW",
+		"Country": "RU",
+		"Adults":  1,
+		"Value":   100,
+	}
+
+	program, err := eng.Compile(`(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, params)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
 	}
 }
 
-// benchExprs covers the shapes expr is most often asked to run: plain
-// comparisons, field chains, builtin calls, string concatenation, and
-// short-circuit logic. If any of these regress materially, it will show
-// up first.
-var benchExprs = map[string]string{
-	"literal":     "42",
-	"arith":       "1 + 2 * 3",
-	"condition":   "state.counter < state.limit && state.user.active",
-	"nested_sel":  "state.user.age >= 18",
-	"index":       "state.items[2]",
-	"builtin_len": "len(state.items) > 3",
-	"template":    `inputs.prefix + string(state.counter)`,
-	"has_key":     `has(state.user, "active")`,
-	"contains":    `contains(state.items, 3)`,
-	"mixed":       `state.counter * inputs.multiplier + len(state.items)`,
-}
+func Benchmark_expr_eval(b *testing.B) {
+	params := map[string]any{
+		"Origin":  "MOW",
+		"Country": "RU",
+		"Adults":  1,
+		"Value":   100,
+	}
 
-func BenchmarkCompile(b *testing.B) {
-	e := New(WithBuiltins())
-	for name, src := range benchExprs {
-		b.Run(name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_, err := e.Compile(src)
-				if err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
+	var out any
+	var err error
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = eng.Eval(ctx, `(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`, params)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
 	}
 }
 
-func BenchmarkRun(b *testing.B) {
-	e := New(WithBuiltins())
-	env := benchEnv()
-	for name, src := range benchExprs {
-		prog, err := e.Compile(src)
-		if err != nil {
-			b.Fatalf("%s: compile failed: %v", name, err)
-		}
-		b.Run(name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				if _, err := prog.Run(b.Context(), env); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
+func Benchmark_len(b *testing.B) {
+	env := map[string]any{
+		"arr": make([]int, 100),
+	}
+
+	program, err := eng.Compile(`len(arr)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if out.(int) != 100 {
+		b.Fatalf("unexpected result %v", out)
 	}
 }
 
-// BenchmarkCompileRun measures the combined cost, relevant for
-// consumers that evaluate an expression once and throw it away.
-func BenchmarkCompileRun(b *testing.B) {
-	e := New(WithBuiltins())
-	env := benchEnv()
-	src := "state.counter * inputs.multiplier + len(state.items)"
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		prog, err := e.Compile(src)
-		if err != nil {
-			b.Fatal(err)
+func Benchmark_filter(b *testing.B) {
+	ints := make([]int, 1000)
+	for i := 1; i <= len(ints); i++ {
+		ints[i-1] = i
+	}
+	env := map[string]any{"Ints": ints}
+
+	program, err := eng.Compile(`filter(Ints, it % 7 == 0)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if got := len(out.([]any)); got != 142 {
+		b.Fatalf("unexpected length %d", got)
+	}
+}
+
+func Benchmark_filterLen(b *testing.B) {
+	ints := make([]int, 1000)
+	for i := 1; i <= len(ints); i++ {
+		ints[i-1] = i
+	}
+	env := map[string]any{"Ints": ints}
+
+	program, err := eng.Compile(`len(filter(Ints, it % 7 == 0))`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if out.(int) != 142 {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_filterFirst(b *testing.B) {
+	ints := make([]int, 1000)
+	for i := 1; i <= len(ints); i++ {
+		ints[i-1] = i
+	}
+	env := map[string]any{"Ints": ints}
+
+	program, err := eng.Compile(`filter(Ints, it % 7 == 0)[0]`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if out.(int) != 7 {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_filterMap(b *testing.B) {
+	ints := make([]int, 100)
+	for i := 1; i <= len(ints); i++ {
+		ints[i-1] = i
+	}
+	env := map[string]any{"Ints": ints}
+
+	program, err := eng.Compile(`map(filter(Ints, it % 7 == 0), it * 2)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	arr := out.([]any)
+	if len(arr) != 14 || arr[0].(int64) != 14 {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_arrayIndex(b *testing.B) {
+	arr := make([]int, 100)
+	for i := 0; i < 100; i++ {
+		arr[i] = i
+	}
+	env := map[string]any{"arr": arr}
+
+	program, err := eng.Compile(`arr[50]`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if out.(int) != 50 {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+type Price struct {
+	Value int
+}
+type priceEnv struct {
+	Price Price
+}
+
+func Benchmark_envStruct(b *testing.B) {
+	program, err := eng.Compile(`Price.Value > 0`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := priceEnv{Price: Price{Value: 1}}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_envMap(b *testing.B) {
+	env := map[string]any{
+		"price": Price{Value: 1},
+	}
+
+	program, err := eng.Compile(`price.Value > 0`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+type CallEnv struct {
+	A   int
+	B   int
+	C   int
+	Fn  func() bool
+	Foo CallFoo
+}
+
+func (CallEnv) Func() string {
+	return "func"
+}
+
+type CallFoo struct {
+	D int
+	E int
+	F int
+}
+
+func (CallFoo) Method() string {
+	return "method"
+}
+
+func Benchmark_callFunc(b *testing.B) {
+	program, err := eng.Compile(`Func()`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := CallEnv{}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if out.(string) != "func" {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_callMethod(b *testing.B) {
+	program, err := eng.Compile(`Foo.Method()`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := CallEnv{}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if out.(string) != "method" {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_callField(b *testing.B) {
+	program, err := eng.Compile(`Fn()`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := CallEnv{
+		Fn: func() bool { return true },
+	}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_largeStructAccess(b *testing.B) {
+	type Env struct {
+		Data  [1024 * 1024 * 10]byte
+		Field int
+	}
+
+	program, err := eng.Compile(`Field > 0 && Field > 1 && Field < 99`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := Env{Field: 21}
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, &env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_largeNestedStructAccess(b *testing.B) {
+	type Env struct {
+		Inner struct {
+			Data  [1024 * 1024 * 10]byte
+			Field int
 		}
-		if _, err := prog.Run(b.Context(), env); err != nil {
-			b.Fatal(err)
-		}
+	}
+
+	program, err := eng.Compile(`Inner.Field > 0 && Inner.Field > 1 && Inner.Field < 99`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := Env{}
+	env.Inner.Field = 21
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, &env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
+	}
+}
+
+func Benchmark_largeNestedArrayAccess(b *testing.B) {
+	type Env struct {
+		Data [1][1024 * 1024 * 10]byte
+	}
+
+	program, err := eng.Compile(`Data[0][0] > 0`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	env := Env{}
+	env.Data[0][0] = 1
+
+	var out any
+	ctx := context.Background()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		out, err = program.Run(ctx, &env)
+	}
+	b.StopTimer()
+
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !out.(bool) {
+		b.Fatalf("unexpected result %v", out)
 	}
 }

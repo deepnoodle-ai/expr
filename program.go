@@ -597,11 +597,162 @@ func applyBinary(op token.Token, lhs, rhs any) (any, error) {
 }
 
 func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any, depth int) (any, error) {
+	// Fast path: an ident-rooted selector chain (a.b.c.d) can be walked
+	// entirely through reflect.Value, materializing only the leaf via
+	// Interface(). The general path below boxes every intermediate
+	// result through any, which copies struct field data — a 10 MiB
+	// embedded array gets memcpy'd on each access. The fast path skips
+	// plain map[string]any roots because the type-asserted map lookup
+	// in selectField is already faster than reflect MapIndex.
+	if v, ok, err := evalSelectorChainRV(n, env); ok {
+		return v, err
+	}
 	recv, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	return selectField(recv, n.Sel.Name)
+}
+
+// evalSelectorChainRV walks an ident-rooted selector chain in reflect
+// space. ok is true when the fast path was taken (regardless of error);
+// when false the caller must use the general path. The fast path
+// declines for non-ident roots, for plain map[string]any envs (the
+// general path is faster there), and for itEnv lookups of `it`/`index`
+// whose values do not benefit.
+func evalSelectorChainRV(n *ast.SelectorExpr, env any) (any, bool, error) {
+	if _, isMap := env.(map[string]any); isMap {
+		return nil, false, nil
+	}
+	// Collect chain names leaf-first and find the root.
+	var names []string
+	cur := ast.Expr(n)
+	for {
+		sel, isSel := cur.(*ast.SelectorExpr)
+		if !isSel {
+			break
+		}
+		names = append(names, sel.Sel.Name)
+		cur = sel.X
+	}
+	ident, ok := cur.(*ast.Ident)
+	if !ok {
+		return nil, false, nil
+	}
+	switch ident.Name {
+	case "true", "false", "nil":
+		return nil, false, nil
+	}
+	rv, ok := lookupEnvRV(env, ident.Name)
+	if !ok {
+		return nil, false, nil
+	}
+	for i := len(names) - 1; i >= 0; i-- {
+		next, err := selectFieldRV(rv, displayIdent(names[i]))
+		if err != nil {
+			return nil, true, err
+		}
+		rv = next
+	}
+	if !rv.IsValid() {
+		return nil, true, nil
+	}
+	if !rv.CanInterface() {
+		return nil, true, fmt.Errorf("%w: field %q not accessible",
+			ErrEvaluate, displayIdent(names[0]))
+	}
+	return rv.Interface(), true, nil
+}
+
+// lookupEnvRV mirrors lookupEnv but returns a reflect.Value so callers
+// can chain field accesses without boxing intermediate struct values.
+// Map and itEnv lookups still go through any internally because their
+// stored values already live behind interfaces.
+func lookupEnvRV(env any, name string) (reflect.Value, bool) {
+	if env == nil {
+		return reflect.Value{}, false
+	}
+	if it, ok := env.(*itEnv); ok {
+		switch name {
+		case "it":
+			return reflect.ValueOf(it.it), true
+		case "index":
+			return reflect.ValueOf(it.index), true
+		}
+		return lookupEnvRV(it.parent, name)
+	}
+	if m, ok := env.(map[string]any); ok {
+		v, ok := m[name]
+		if !ok {
+			return reflect.Value{}, false
+		}
+		return reflect.ValueOf(v), true
+	}
+	rv := reflect.ValueOf(env)
+	orig := rv
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return reflect.Value{}, false
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.Struct:
+		if fv := rv.FieldByName(name); fv.IsValid() && fv.CanInterface() {
+			return fv, true
+		}
+		if mv := orig.MethodByName(name); mv.IsValid() {
+			return mv, true
+		}
+	case reflect.Map:
+		if rv.Type().Key().Kind() == reflect.String {
+			mv := rv.MapIndex(reflect.ValueOf(name))
+			if mv.IsValid() {
+				return mv, true
+			}
+		}
+	}
+	return reflect.Value{}, false
+}
+
+// selectFieldRV reads a field/key from rv without boxing the parent
+// through any. It mirrors selectField's behavior on structs and
+// string-keyed maps, transparently dereffing pointers and unwrapping
+// interface values. Errors are produced lazily — the cold path may
+// call Interface() to build a "did you mean" hint.
+func selectFieldRV(rv reflect.Value, name string) (reflect.Value, error) {
+	for rv.Kind() == reflect.Interface && !rv.IsNil() {
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() {
+		return reflect.Value{}, fmt.Errorf("%w: cannot access %q on nil", ErrEvaluate, name)
+	}
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return reflect.Value{}, fmt.Errorf("%w: cannot access %q on nil pointer", ErrEvaluate, name)
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.Struct:
+		fv := rv.FieldByName(name)
+		if !fv.IsValid() || !fv.CanInterface() {
+			return reflect.Value{}, fmt.Errorf("%w: field %q not found on %v%s",
+				ErrEvaluate, name, rv.Type(), fieldHint(rv.Interface(), name))
+		}
+		return fv, nil
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return reflect.Value{}, fmt.Errorf("%w: cannot select %q on map with non-string keys", ErrEvaluate, name)
+		}
+		mv := rv.MapIndex(reflect.ValueOf(name))
+		if !mv.IsValid() {
+			return reflect.Value{}, fmt.Errorf("%w: key %q not found%s",
+				ErrEvaluate, name, fieldHint(rv.Interface(), name))
+		}
+		return mv, nil
+	}
+	return reflect.Value{}, fmt.Errorf("%w: cannot select %q on %v", ErrEvaluate, name, rv.Type())
 }
 
 func selectField(recv any, name string) (any, error) {
@@ -654,6 +805,11 @@ func selectField(recv any, name string) (any, error) {
 }
 
 func (p *Program) evalIndex(ctx context.Context, n *ast.IndexExpr, env any, depth int) (any, error) {
+	// Fast path: filter(xs, p)[k] with a small constant k stops at the
+	// (k+1)-th match instead of materializing the full filtered slice.
+	if v, ok, err := p.tryFilterIndex(ctx, n, env, depth); ok {
+		return v, err
+	}
 	recv, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
 		return nil, err
@@ -663,6 +819,75 @@ func (p *Program) evalIndex(ctx context.Context, n *ast.IndexExpr, env any, dept
 		return nil, err
 	}
 	return indexValue(recv, idx)
+}
+
+// tryFilterIndex recognises `filter(xs, predicate)[N]` where N is a
+// non-negative integer literal and `filter` is the built-in special
+// form (not shadowed by env or funcs). When matched, it iterates xs
+// and stops as soon as the N-th matching element is found, mirroring
+// the result of the general path without allocating the intermediate
+// slice. ok is true when the fast path was taken.
+func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any, depth int) (any, bool, error) {
+	call, ok := n.X.(*ast.CallExpr)
+	if !ok {
+		return nil, false, nil
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "filter" || len(call.Args) != 2 {
+		return nil, false, nil
+	}
+	// Respect identifier shadowing: a user-registered or env-bound
+	// "filter" goes through the general call path.
+	if _, inEnv := lookupEnv(env, "filter"); inEnv {
+		return nil, false, nil
+	}
+	if _, inFuncs := p.funcs["filter"]; inFuncs {
+		return nil, false, nil
+	}
+	lit, ok := n.Index.(*ast.BasicLit)
+	if !ok || lit.Kind != token.INT {
+		return nil, false, nil
+	}
+	target, err := strconv.ParseInt(lit.Value, 0, 64)
+	if err != nil || target < 0 {
+		return nil, false, nil
+	}
+
+	// Stream the collection via reflect rather than materializing it
+	// through iterItems — for filter(xs, p)[0] over a 1000-element
+	// slice, the unstreamed path allocates 1000 any-boxes only to
+	// throw 999 of them away.
+	coll, err := p.eval(ctx, call.Args[0], env, depth)
+	if err != nil {
+		return nil, true, err
+	}
+	if coll == nil {
+		return nil, true, fmt.Errorf("%w: index %d out of range", ErrEvaluate, target)
+	}
+	rv := reflect.ValueOf(coll)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, true, fmt.Errorf("%w: filter expects a list as its first argument, got %T",
+			ErrEvaluate, coll)
+	}
+	scope := &itEnv{parent: env}
+	var seen int64
+	for i := 0; i < rv.Len(); i++ {
+		item := rv.Index(i).Interface()
+		scope.it = item
+		scope.index = int64(i)
+		v, err := p.eval(ctx, call.Args[1], scope, depth)
+		if err != nil {
+			return nil, true, err
+		}
+		if !isTruthy(v) {
+			continue
+		}
+		if seen == target {
+			return item, true, nil
+		}
+		seen++
+	}
+	return nil, true, fmt.Errorf("%w: index %d out of range", ErrEvaluate, target)
 }
 
 func indexValue(recv, idx any) (any, error) {
