@@ -11,84 +11,12 @@ import (
 // buildCallArgs doesn't allocate a fresh one on every call.
 var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
 
-// callFastPath dispatches a function whose Go type matches one of the
-// shapes our standard builtins use. The returned ok signals whether the
-// fast path applied; when false the caller falls through to reflect.
-// Arity errors are reported here so behavior matches the reflect path.
-func callFastPath(name string, fn any, args []any) (any, bool, error) {
-	switch f := fn.(type) {
-	case func(any) (int, error):
-		if len(args) != 1 {
-			return nil, true, arityError(name, 1, len(args))
-		}
-		v, err := f(args[0])
-		return v, true, err
-	case func(any) string:
-		if len(args) != 1 {
-			return nil, true, arityError(name, 1, len(args))
-		}
-		return f(args[0]), true, nil
-	case func(any) (int64, error):
-		if len(args) != 1 {
-			return nil, true, arityError(name, 1, len(args))
-		}
-		v, err := f(args[0])
-		return v, true, err
-	case func(any) (float64, error):
-		if len(args) != 1 {
-			return nil, true, arityError(name, 1, len(args))
-		}
-		v, err := f(args[0])
-		return v, true, err
-	case func(any) bool:
-		if len(args) != 1 {
-			return nil, true, arityError(name, 1, len(args))
-		}
-		return f(args[0]), true, nil
-	case func(any, any) (bool, error):
-		if len(args) != 2 {
-			return nil, true, arityError(name, 2, len(args))
-		}
-		v, err := f(args[0], args[1])
-		return v, true, err
-	case func(any) ([]any, error):
-		if len(args) != 1 {
-			return nil, true, arityError(name, 1, len(args))
-		}
-		v, err := f(args[0])
-		return v, true, err
-	case func(string) string:
-		// Decline when the arg isn't already a string so the reflect
-		// path's convertArg can run its normal coercion / error.
-		if len(args) == 1 {
-			if s, ok := args[0].(string); ok {
-				return f(s), true, nil
-			}
-		}
-		return nil, false, nil
-	}
-	return nil, false, nil
-}
-
-func arityError(name string, want, got int) error {
-	return fmt.Errorf("%w: %q expects %d args, got %d", ErrEvaluate, name, want, got)
-}
-
 // callFunction invokes fn with args using reflection. Argument values are
 // converted to the function's declared parameter types where possible.
 // Return signatures supported: (), (T), (T, error). If the function's
 // first parameter is context.Context, ctx is passed through automatically
 // and is not counted against the caller-supplied argument list.
 func callFunction(ctx context.Context, name string, fn any, args []any) (any, error) {
-	// Fast path: most builtins (and many user functions) match a small
-	// set of statically-known signatures. Type-asserting on those
-	// bypasses reflect.Call, the buildCallArgs slice allocation, and
-	// the per-arg convertArg trip — closing roughly half the gap with
-	// expr-lang on hot calls like len(xs).
-	if v, ok, err := callFastPath(name, fn, args); ok {
-		return v, err
-	}
-
 	fv := reflect.ValueOf(fn)
 	if fv.Kind() != reflect.Func {
 		return nil, fmt.Errorf("%w: %q is not a function (got %T)", ErrEvaluate, name, fn)
