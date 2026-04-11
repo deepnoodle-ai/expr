@@ -1,9 +1,14 @@
 # expr
 
-A small, embeddable expression language for Go, built on `go/parser`. It
-accepts a strict subset of Go's expression syntax and is intended for
-conditions, templates, and parameter interpolation inside a larger Go
-program.
+A small expression language for Go programs. You write a line that looks like
+Go, `expr` compiles it, and you run it against whatever data you have lying
+around: a map, a struct, a pointer to a struct. Handy for conditions,
+templates, and little bits of user-supplied logic you don't want to turn into
+a full plugin system.
+
+It is built directly on `go/parser`, so the syntax will feel familiar: it is
+mostly a subset of Go's own expression grammar, with a few ergonomic additions
+like JSON-style object and array literals.
 
 ## Install
 
@@ -11,242 +16,115 @@ program.
 go get github.com/deepnoodle-ai/expr
 ```
 
-## Quickstart
-
-`Compile` parses an expression once and returns a `*Program` that can
-be run against many inputs. Programs are immutable and safe for
-concurrent use. No functions are registered by default — pass
-`WithBuiltins` to opt in to the standard set: `len`, `contains`, `has`,
-`keys`, `upper`, `lower`, `int`, `float`, `string`, `bool`, `sprintf`.
+## A taste
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/deepnoodle-ai/expr"
+p, err := expr.Compile(
+    `user.age >= 18 && contains(user.roles, "admin")`,
+    expr.WithBuiltins(),
 )
-
-func main() {
-	ctx := context.Background()
-
-	p, err := expr.Compile(
-		`user.age >= 18 && contains(user.roles, "admin")`,
-		expr.WithBuiltins(),
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	env := map[string]any{
-		"user": map[string]any{
-			"name":  "ada",
-			"age":   36,
-			"roles": []any{"admin", "editor"},
-		},
-	}
-
-	v, err := p.Run(ctx, env)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(v) // true
+if err != nil {
+    panic(err)
 }
+
+ok, err := p.Run(ctx, map[string]any{
+    "user": map[string]any{
+        "age":   36,
+        "roles": []any{"admin", "editor"},
+    },
+})
+if err != nil {
+    panic(err)
+}
+fmt.Println(ok) // true
 ```
 
-Runnable copy: [`examples/basic`](examples/basic).
+`Compile` does the parsing work once. The returned `*Program` is immutable and
+safe to share between goroutines, so the usual pattern is: compile at startup,
+run per request.
 
-## Struct environments
-
-The env passed to `Run` can also be a struct (or a pointer to one).
-Exported fields and zero-argument methods are both reachable as
-identifiers inside the expression.
+No functions are registered by default, which keeps the surface area exactly
+as wide as you want it. `WithBuiltins()` opts you into a small standard set
+(`len`, `contains`, `has`, `keys`, `upper`, `lower`, `int`, `float`, `string`,
+`bool`, `sprintf`), and `WithFunctions` lets you register any Go function you
+like as a callable identifier:
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/deepnoodle-ai/expr"
-)
-
-type Order struct {
-	ID       string
-	Customer string
-	Items    []LineItem
-}
-
-type LineItem struct {
-	SKU      string
-	Quantity int
-	Price    float64
-}
-
-func (o Order) Subtotal() float64 {
-	var total float64
-	for _, it := range o.Items {
-		total += it.Price * float64(it.Quantity)
-	}
-	return total
-}
-
-func main() {
-	ctx := context.Background()
-
-	order := Order{
-		ID:       "A-1042",
-		Customer: "Ada Lovelace",
-		Items: []LineItem{
-			{SKU: "widget", Quantity: 2, Price: 19.99},
-			{SKU: "gadget", Quantity: 1, Price: 89.52},
-		},
-	}
-
-	p, err := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins())
-	if err != nil {
-		panic(err)
-	}
-	v, err := p.Run(ctx, order)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(v) // true
-}
+p, err := expr.Compile(`greet(upper(name))`, expr.WithFunctions(map[string]any{
+    "upper": strings.ToUpper,
+    "greet": func(name string) string { return "Hello, " + name + "!" },
+}))
 ```
 
-Runnable copy: [`examples/structs`](examples/structs).
+Mix and match, or skip the builtins entirely and expose only the handful of
+functions that make sense for your sandbox.
 
-## Calling Go functions from expressions
+## What the environment can be
 
-`WithFunctions` registers arbitrary Go functions as callable identifiers.
-Arguments are converted to the declared parameter types at call time, and
-`(T, error)` return pairs surface errors naturally.
+Whatever you pass to `Run` is what the expression sees. A `map[string]any`
+works. So does a struct, or a pointer to one: exported fields and zero-arg
+methods both become identifiers inside the expression.
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"strings"
-
-	"github.com/deepnoodle-ai/expr"
-)
-
-func main() {
-	ctx := context.Background()
-
-	env := map[string]any{"name": "ada"}
-
-	p, err := expr.Compile(`greet(upper(name))`, expr.WithFunctions(map[string]any{
-		"upper":     strings.ToUpper,
-		"hasPrefix": strings.HasPrefix,
-		"greet": func(name string) string {
-			return "Hello, " + name + "!"
-		},
-	}))
-	if err != nil {
-		panic(err)
-	}
-	v, err := p.Run(ctx, env)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(v) // Hello, ADA!
-}
+p, err := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins())
+v, err := p.Run(ctx, order) // order is some struct with a Subtotal() method
 ```
 
-Runnable copy: [`examples/funcs`](examples/funcs).
+## JSON-style literals
 
-## Compile once, run many
-
-Parsing is cheap but not free. When the same expression runs against many
-inputs, compile once and reuse the `*Program`. Programs are immutable and
-safe to evaluate from multiple goroutines.
+Object and array literals work the way you'd hope, without the Go ceremony:
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/deepnoodle-ai/expr"
-)
-
-func main() {
-	ctx := context.Background()
-
-	pred, err := expr.Compile(`age >= 18 && contains(roles, "admin")`, expr.WithBuiltins())
-	if err != nil {
-		panic(err)
-	}
-
-	people := []map[string]any{
-		{"name": "Ada", "age": 36, "roles": []any{"admin"}},
-		{"name": "Bob", "age": 17, "roles": []any{"admin"}},
-		{"name": "Eve", "age": 41, "roles": []any{"viewer"}},
-	}
-
-	for _, p := range people {
-		v, _ := pred.Run(ctx, p)
-		fmt.Printf("%s => %v\n", p["name"], v)
-	}
-}
+p, err := expr.Compile(`{"items": [1, 2, 3], "count": 3, "ok": true}`)
 ```
 
-Runnable copy: [`examples/compile_once`](examples/compile_once).
+Under the hood, bare `[...]` becomes `[]any{...}` and `{"k": v}` becomes
+`map[string]any{"k": v}`. Strings, comments, and real Go composite literals
+are left alone, so nothing you already had stops working.
 
 ## Templates
 
-`NewTemplate` is a tiny `${...}` interpolator that compiles each
-expression once at construction time and re-evaluates them per call.
+There is also a tiny `${...}` interpolator for when you want expressions
+embedded in a string:
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/deepnoodle-ai/expr"
+tmpl, err := expr.NewTemplate(
+    `Hello ${user.name}! You have ${len(user.tasks)} task(s).`,
+    expr.WithBuiltins(),
 )
-
-func main() {
-	ctx := context.Background()
-
-	tmpl, err := expr.NewTemplate(
-		`Hello ${user.name}! You have ${len(user.tasks)} task(s).`,
-		expr.WithBuiltins())
-	if err != nil {
-		panic(err)
-	}
-
-	out, err := tmpl.Render(ctx, map[string]any{
-		"user": map[string]any{
-			"name":  "Ada",
-			"tasks": []any{"ship", "deploy", "celebrate"},
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(out) // Hello Ada! You have 3 task(s).
-}
+out, err := tmpl.Render(ctx, env)
 ```
 
-Runnable copy: [`examples/template`](examples/template).
+Each `${...}` is compiled once at construction time and re-evaluated on every
+`Render`.
+
+## Higher-order forms
+
+For working with lists there is a small set of always-available forms:
+`map`, `filter`, `any`, `all`, `find`, and `count`. Inside the second
+argument, `it` is the current element and `index` is its position:
+
+```go
+p, err := expr.Compile(`filter(users, it.age >= 18 && index < 10)`)
+```
+
+The predicate is re-evaluated per element, so you can compose them
+naturally: `any(orders, count(it.items, it.price > 100) > 0)`. These
+forms are always registered (they don't need `WithBuiltins`), but you
+can shadow any of them by registering a function or env value of the
+same name if you want your own behavior.
+
+## Safety
+
+`expr` is meant to run expressions you do not fully trust, so the parser and
+evaluator both have bounds (`MaxSourceLength`, `MaxEvalDepth`) to keep a
+pathological input from eating your stack. There are no loops, no
+assignments, and no way to define new functions from inside an expression.
 
 ## More
 
-- [`docs/SPEC.md`](docs/SPEC.md) for the full language specification
-- [`examples/`](examples/) for runnable examples, including
-  [`examples/higher_order`](examples/higher_order) which covers
-  `map`, `filter`, `any`, `all`, `find`, and `count`
+- [`docs/SPEC.md`](docs/SPEC.md) is the authoritative language reference.
+- [`examples/`](examples/) has runnable versions of everything above.
 
 ## License
 
