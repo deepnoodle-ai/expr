@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// IsTruthyValue reports whether a Go value should be treated as truthy in
+// IsTruthy reports whether a Go value should be treated as truthy in
 // expr conditionals. The rules are:
 //
 //   - bool: itself
@@ -16,7 +16,7 @@ import (
 //   - anything else: non-nil is truthy
 //
 // This is also exposed as the bool() builtin.
-func IsTruthyValue(value any) bool {
+func IsTruthy(value any) bool {
 	switch v := value.(type) {
 	case nil:
 		return false

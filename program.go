@@ -201,7 +201,7 @@ func applyUnary(op token.Token, v any) (any, error) {
 	return nil, fmt.Errorf("%w: unsupported unary operator %v", ErrEvaluate, op)
 }
 
-var _ Script = (*Program)(nil)
+var _ runner = (*Program)(nil)
 
 // Source returns the original expression text.
 func (p *Program) Source() string { return p.source }
@@ -209,11 +209,21 @@ func (p *Program) Source() string { return p.source }
 // Run evaluates the program against env. env may be a map[string]any, a
 // struct, or a pointer to a struct — identifier lookups resolve to map
 // keys, struct fields, or bound methods (in that order of preference).
-// Identifiers not found in env are then looked up against the engine's
-// registered functions. The literals true, false, and nil are recognized
-// directly. Any unsupported syntax node (slice expressions, type
-// assertions, function literals, channel operations, etc.) returns an
-// error wrapping ErrEvaluate.
+// Identifiers not found in env are then looked up against the functions
+// registered via [WithFunctions] / [WithBuiltins]. The literals true,
+// false, and nil are recognized directly. Any unsupported syntax node
+// (slice expressions, type assertions, function literals, channel
+// operations, etc.) returns an error wrapping ErrEvaluate.
+//
+// Env values that are themselves Go functions are callable from the
+// expression: `f(x)` first looks up `f` in env, and if it finds a
+// function value it is invoked through the same reflect-based dispatch
+// used for [WithFunctions]-registered functions. Prefer registering
+// functions via CompileOptions when possible — those go through a
+// faster prepared path and participate in "did you mean…" diagnostics
+// — but putting callables in env is a useful escape hatch for
+// per-request closures or hosts that want to rebind helpers on every
+// Run.
 //
 // expr checks ctx.Err() at the top of every AST node, so any
 // pure-expression evaluation exits within one node of cancellation.

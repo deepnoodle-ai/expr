@@ -8,19 +8,12 @@ import (
 	"strings"
 )
 
-// Script is a compiled program that can be run against an environment.
-// *Program implements Script directly, so any host that accepts a Script
-// can also accept a *Program returned from [Compile].
-type Script interface {
+// runner is the minimal interface templateSegment needs to evaluate a
+// compiled expression. *Program is the only production implementation;
+// the interface exists so template tests can drive parseTemplate with
+// mock scripts that never touch the real engine.
+type runner interface {
 	Run(ctx context.Context, env any) (any, error)
-}
-
-// Compiler turns source code into a [Script]. Most callers do not need
-// this type — use [Compile] or [NewTemplate] directly. It is provided
-// so hosts that want to accept a pluggable expression backend have a
-// named interface to target.
-type Compiler interface {
-	Compile(code string) (Script, error)
 }
 
 // Template is a pre-compiled `${...}` string interpolator. Each
@@ -48,7 +41,7 @@ type Template struct {
 // point at the exact expression that failed.
 type templateSegment struct {
 	literal string
-	script  Script
+	script  runner
 	source  string
 	offset  int
 }
@@ -56,20 +49,21 @@ type templateSegment struct {
 // NewTemplate parses raw and pre-compiles every `${...}` expression
 // with the given CompileOptions. Strings without any `${...}` are
 // accepted and become constant templates that return raw unchanged
-// from [Template.Eval].
+// from [Template.Render].
 func NewTemplate(raw string, opts ...CompileOption) (*Template, error) {
-	return parseTemplate(raw, func(code string) (Script, error) {
+	return parseTemplate(raw, func(code string) (runner, error) {
 		return Compile(code, opts...)
 	})
 }
 
-// Raw returns the unparsed template source.
-func (t *Template) Raw() string { return t.raw }
+// Source returns the unparsed template source.
+func (t *Template) Source() string { return t.raw }
 
-// Eval evaluates each `${...}` expression against globals and
-// concatenates the results with the surrounding literal text.
-// Templates with no expressions return the raw source unchanged
-// without invoking any script.
+// Render evaluates each `${...}` expression against env and
+// concatenates the results with the surrounding literal text. env
+// follows the same rules as [Program.Run]: it may be a map[string]any,
+// a struct, or a pointer to a struct. Templates with no expressions
+// return the raw source unchanged without invoking any script.
 //
 // Value rendering rules for each `${...}` result:
 //
@@ -86,7 +80,7 @@ func (t *Template) Raw() string { return t.raw }
 // was nil" from "value was the empty string" in its output. Callers
 // that need that distinction should wrap the expression in something
 // that returns a sentinel.
-func (t *Template) Eval(ctx context.Context, globals map[string]any) (string, error) {
+func (t *Template) Render(ctx context.Context, env any) (string, error) {
 	// Fast path: no expressions means the raw string is the answer.
 	if len(t.segments) == 1 && t.segments[0].script == nil {
 		return t.segments[0].literal, nil
@@ -99,7 +93,7 @@ func (t *Template) Eval(ctx context.Context, globals map[string]any) (string, er
 			b.WriteString(seg.literal)
 			continue
 		}
-		v, err := seg.script.Run(ctx, globals)
+		v, err := seg.script.Run(ctx, env)
 		if err != nil {
 			return "", fmt.Errorf("template: evaluating ${%s} at offset %d: %w", seg.source, seg.offset, err)
 		}
@@ -125,10 +119,10 @@ func formatTemplateValue(v any) string {
 // parseTemplate walks raw once, emitting literal segments for plain
 // text and compiling each `${...}` body via the supplied compile
 // function. It preserves a single literal segment for constant
-// templates so Eval can take the fast path. The compile parameter is
-// a function rather than a Compiler interface so tests can drive the
-// parser with mock compile functions that never touch the real engine.
-func parseTemplate(raw string, compile func(string) (Script, error)) (*Template, error) {
+// templates so Render can take the fast path. The compile parameter is
+// a function so tests can drive the parser with mock compile functions
+// that never touch the real engine.
+func parseTemplate(raw string, compile func(string) (runner, error)) (*Template, error) {
 	segs, err := parseTemplateSegments(raw, compile)
 	if err != nil {
 		return nil, err
@@ -136,7 +130,7 @@ func parseTemplate(raw string, compile func(string) (Script, error)) (*Template,
 	return &Template{raw: raw, segments: segs}, nil
 }
 
-func parseTemplateSegments(raw string, compile func(string) (Script, error)) ([]templateSegment, error) {
+func parseTemplateSegments(raw string, compile func(string) (runner, error)) ([]templateSegment, error) {
 	if raw == "" {
 		return []templateSegment{{literal: ""}}, nil
 	}

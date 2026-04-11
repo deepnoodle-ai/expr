@@ -122,7 +122,7 @@ group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
 
 ## Truthiness
 
-Used by `!`, `&&`, `||`, and `bool(v)`. Delegated to `IsTruthyValue`,
+Used by `!`, `&&`, `||`, and `bool(v)`. Delegated to `IsTruthy`,
 which treats these as **falsey**:
 
 - `nil`

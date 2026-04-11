@@ -209,7 +209,7 @@ func main() {
 		panic(err)
 	}
 
-	out, err := tmpl.Eval(ctx, map[string]any{
+	out, err := tmpl.Render(ctx, map[string]any{
 		"user": map[string]any{
 			"name":  "Ada",
 			"tasks": []any{"ship", "deploy", "celebrate"},

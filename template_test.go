@@ -15,7 +15,7 @@ import (
 // enough behavior to exercise value interpolation, not the full expr
 // language. Expression bodies that don't look like dotted idents are
 // still accepted so parser tests that never Eval can use this compile.
-func lookupCompile(code string) (Script, error) {
+func lookupCompile(code string) (runner, error) {
 	return &lookupScript{expr: code}, nil
 }
 
@@ -48,7 +48,7 @@ type recordingCompile struct {
 	bodies []string
 }
 
-func (c *recordingCompile) Compile(code string) (Script, error) {
+func (c *recordingCompile) Compile(code string) (runner, error) {
 	c.bodies = append(c.bodies, code)
 	return noopScript{}, nil
 }
@@ -59,8 +59,8 @@ func (noopScript) Run(context.Context, any) (any, error) { return nil, nil }
 
 // constCompile returns a script that produces a fixed value regardless
 // of input. Useful for driving Eval paths (empty string, typed values).
-func constCompile(value any) func(string) (Script, error) {
-	return func(string) (Script, error) { return constScript{value: value}, nil }
+func constCompile(value any) func(string) (runner, error) {
+	return func(string) (runner, error) { return constScript{value: value}, nil }
 }
 
 type constScript struct{ value any }
@@ -70,12 +70,12 @@ func (s constScript) Run(context.Context, any) (any, error) { return s.value, ni
 // errCompile fails on any Compile call. Used to verify error wrapping.
 var errBoom = errors.New("boom")
 
-func errCompile(string) (Script, error) { return nil, errBoom }
+func errCompile(string) (runner, error) { return nil, errBoom }
 
 func TestTemplate_PlainString(t *testing.T) {
 	tmpl, err := parseTemplate("Hello World", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "Hello World", got)
 }
@@ -83,7 +83,7 @@ func TestTemplate_PlainString(t *testing.T) {
 func TestTemplate_EmptyString(t *testing.T) {
 	tmpl, err := parseTemplate("", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "", got)
 }
@@ -91,7 +91,7 @@ func TestTemplate_EmptyString(t *testing.T) {
 func TestTemplate_SingleExpression(t *testing.T) {
 	tmpl, err := parseTemplate("Hello ${state.name}", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), map[string]any{
+	got, err := tmpl.Render(context.Background(), map[string]any{
 		"state": map[string]any{"name": "Alice"},
 	})
 	require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestTemplate_SingleExpression(t *testing.T) {
 func TestTemplate_MultipleExpressions(t *testing.T) {
 	tmpl, err := parseTemplate("${state.greeting} ${state.name}!", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), map[string]any{
+	got, err := tmpl.Render(context.Background(), map[string]any{
 		"state": map[string]any{"greeting": "Hello", "name": "Bob"},
 	})
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestTemplate_EmptyStringResultOrderingIsStable(t *testing.T) {
 	}
 	tmpl, err := parseTemplate("[${A}][${B}][${C}]", c.Compile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "[first][][third]", got)
 }
@@ -227,7 +227,7 @@ func TestTemplate_CommentOnlyExpressionIsRejected(t *testing.T) {
 func TestTemplate_DollarDollarEscape(t *testing.T) {
 	tmpl, err := parseTemplate("price: $${amount}", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "price: ${amount}", got)
 }
@@ -235,7 +235,7 @@ func TestTemplate_DollarDollarEscape(t *testing.T) {
 func TestTemplate_BareDollarIsLiteral(t *testing.T) {
 	tmpl, err := parseTemplate("cost is $5 and $ is fine", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "cost is $5 and $ is fine", got)
 }
@@ -243,7 +243,7 @@ func TestTemplate_BareDollarIsLiteral(t *testing.T) {
 func TestTemplate_TrailingDollarIsLiteral(t *testing.T) {
 	tmpl, err := parseTemplate("ends with $", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "ends with $", got)
 }
@@ -251,7 +251,7 @@ func TestTemplate_TrailingDollarIsLiteral(t *testing.T) {
 func TestTemplate_AdjacentExpressions(t *testing.T) {
 	tmpl, err := parseTemplate("${a.x}${a.y}", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), map[string]any{
+	got, err := tmpl.Render(context.Background(), map[string]any{
 		"a": map[string]any{"x": "AB", "y": "CD"},
 	})
 	require.NoError(t, err)
@@ -261,7 +261,7 @@ func TestTemplate_AdjacentExpressions(t *testing.T) {
 func TestTemplate_NilValueRendersEmpty(t *testing.T) {
 	tmpl, err := parseTemplate("[${x}]", constCompile(nil))
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "[]", got)
 }
@@ -269,7 +269,7 @@ func TestTemplate_NilValueRendersEmpty(t *testing.T) {
 func TestTemplate_IntValueFormattedWithV(t *testing.T) {
 	tmpl, err := parseTemplate("n=${x}", constCompile(42))
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "n=42", got)
 }
@@ -288,7 +288,7 @@ func TestTemplate_CompileErrorIsWrapped(t *testing.T) {
 func TestTemplate_RuntimeErrorIncludesSourceAndOffset(t *testing.T) {
 	tmpl, err := parseTemplate("hi ${state.name} there ${missing}!", lookupCompile)
 	require.NoError(t, err)
-	_, err = tmpl.Eval(context.Background(), map[string]any{
+	_, err = tmpl.Render(context.Background(), map[string]any{
 		"state": map[string]any{"name": "Alice"},
 	})
 	require.Error(t, err)
@@ -297,11 +297,11 @@ func TestTemplate_RuntimeErrorIncludesSourceAndOffset(t *testing.T) {
 	require.Contains(t, err.Error(), "offset 23")
 }
 
-func TestTemplate_Raw(t *testing.T) {
+func TestTemplate_Source(t *testing.T) {
 	src := "hello ${name}"
 	tmpl, err := parseTemplate(src, lookupCompile)
 	require.NoError(t, err)
-	require.Equal(t, src, tmpl.Raw())
+	require.Equal(t, src, tmpl.Source())
 }
 
 // Raw strings can span newlines and contain `}`. The scanner must
@@ -329,7 +329,7 @@ func TestTemplate_LineCommentSkipsBraces(t *testing.T) {
 func TestTemplate_BOMAtStart(t *testing.T) {
 	tmpl, err := parseTemplate("\ufeff${x}!", constCompile("X"))
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "\ufeffX!", got)
 }
@@ -355,7 +355,7 @@ func TestTemplate_DeeplyNestedBraces(t *testing.T) {
 func TestTemplate_StrayClosingBraceIsLiteral(t *testing.T) {
 	tmpl, err := parseTemplate("${a}} tail", constCompile("A"))
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "A} tail", got)
 }
@@ -377,7 +377,7 @@ func TestTemplate_DollarDollarCollapses(t *testing.T) {
 		t.Run(tc.in, func(t *testing.T) {
 			tmpl, err := parseTemplate(tc.in, lookupCompile)
 			require.NoError(t, err)
-			got, err := tmpl.Eval(context.Background(), nil)
+			got, err := tmpl.Render(context.Background(), nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -414,7 +414,7 @@ func TestTemplate_ManyAdjacentExpressions(t *testing.T) {
 	}
 	tmpl, err := parseTemplate("${a}${b}${c}${d}${e}", c.Compile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "12345", got)
 }
@@ -424,7 +424,7 @@ func TestTemplate_ManyAdjacentExpressions(t *testing.T) {
 func TestTemplate_ConstantTemplateFastPath(t *testing.T) {
 	tmpl, err := parseTemplate("no dollars here", lookupCompile)
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), nil)
+	got, err := tmpl.Render(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "no dollars here", got)
 }
@@ -439,7 +439,7 @@ func TestTemplate_ConcurrentEval(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for j := 0; j < 200; j++ {
-				got, err := tmpl.Eval(context.Background(), nil)
+				got, err := tmpl.Render(context.Background(), nil)
 				if err != nil || got != "X-X-X" {
 					t.Errorf("bad result: %q err=%v", got, err)
 					return
@@ -457,7 +457,7 @@ func TestTemplate_ConcurrentEval(t *testing.T) {
 func TestNewTemplate_WithBuiltins(t *testing.T) {
 	tmpl, err := NewTemplate("Hello ${upper(name)}!", WithBuiltins())
 	require.NoError(t, err)
-	got, err := tmpl.Eval(context.Background(), map[string]any{"name": "ada"})
+	got, err := tmpl.Render(context.Background(), map[string]any{"name": "ada"})
 	require.NoError(t, err)
 	require.Equal(t, "Hello ADA!", got)
 }
@@ -467,7 +467,7 @@ func TestNewTemplate_WithBuiltins(t *testing.T) {
 // expression-to-slot ordering even when an expression's result is "".
 type dispatchCompile map[string]string
 
-func (d dispatchCompile) Compile(code string) (Script, error) {
+func (d dispatchCompile) Compile(code string) (runner, error) {
 	v, ok := d[strings.TrimSpace(code)]
 	if !ok {
 		return nil, fmt.Errorf("unknown expr %q", code)

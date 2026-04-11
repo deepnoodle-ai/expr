@@ -6,7 +6,7 @@ import (
 	"github.com/deepnoodle-ai/expr/internal/require"
 )
 
-func TestIsTruthyValue(t *testing.T) {
+func TestIsTruthy(t *testing.T) {
 	tests := []struct {
 		name   string
 		value  any
@@ -32,7 +32,7 @@ func TestIsTruthyValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.expect, IsTruthyValue(tt.value))
+			require.Equal(t, tt.expect, IsTruthy(tt.value))
 		})
 	}
 }
