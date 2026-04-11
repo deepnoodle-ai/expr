@@ -18,7 +18,7 @@ import (
 
 // engOpts is shared across every benchmark so startup cost is not folded
 // into steady-state measurements.
-var engOpts = []expr.CompileOption{expr.WithBuiltins()}
+var engOpts = []expr.Option{expr.WithBuiltins()}
 
 func Benchmark_expr(b *testing.B) {
 	params := map[string]any{
@@ -39,32 +39,6 @@ func Benchmark_expr(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		out, err = program.Run(ctx, params)
-	}
-	b.StopTimer()
-
-	if err != nil {
-		b.Fatal(err)
-	}
-	if !out.(bool) {
-		b.Fatalf("unexpected result %v", out)
-	}
-}
-
-func Benchmark_expr_eval(b *testing.B) {
-	params := map[string]any{
-		"Origin":  "MOW",
-		"Country": "RU",
-		"Adults":  1,
-		"Value":   100,
-	}
-
-	var out any
-	var err error
-	ctx := context.Background()
-
-	b.ResetTimer()
-	for n := 0; n < b.N; n++ {
-		out, err = expr.Eval(ctx, `(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`, params, engOpts...)
 	}
 	b.StopTimer()
 

@@ -146,8 +146,8 @@ A bare identifier `foo` is resolved in this order:
    - If `env` is a struct or a pointer to a struct, take the exported
      field named `foo`; if no field matches, take the bound method
      named `foo`. **Fields beat methods.**
-3. The functions registered via the CompileOptions passed to `Compile`
-   or `Eval` (`WithBuiltins`, `WithFunctions`, or any combination).
+3. The functions registered via the `Option`s passed to `Compile`
+   (`WithBuiltins`, `WithFunctions`, or any combination).
 4. Otherwise: `ErrEvaluate: undefined identifier`.
 
 Unexported struct fields are **not** reachable by name. Attempting to
@@ -250,14 +250,15 @@ an `ErrEvaluate` chain via `errors.Is`.
 ## Builtins
 
 By default no functions are registered. Opt in to the standard set
-below by passing `expr.WithBuiltins()` as a CompileOption, register your
+below by passing `expr.WithBuiltins()` as an `Option`, register your
 own with `expr.WithFunctions(...)`, or combine both:
 
 ```go
-v, err := expr.Eval(ctx, `upper(user.name)`, env,
+p, err := expr.Compile(`upper(user.name)`,
     expr.WithBuiltins(),
     expr.WithFunctions(map[string]any{"upper": strings.ToUpper}),
 )
+v, err := p.Run(ctx, env)
 ```
 
 Options apply in order, so a later `WithFunctions` wins over an earlier
@@ -367,8 +368,7 @@ through the AST, and `MaxEvalDepth` caps the tree. Therefore a program
 with no registered functions and no env-method calls has a hard
 termination bound proportional to the AST size.
 
-`Program.Run(ctx, env)` and `expr.Eval(ctx, code, env, opts...)`
-add cooperative cancellation on top of that bound:
+`Program.Run(ctx, env)` adds cooperative cancellation on top of that bound:
 
 - Every AST node visit checks `ctx.Err()` before dispatching. A
   cancelled or expired context causes the next node to return the raw
@@ -460,7 +460,8 @@ through a token-based rewrite (implemented in `internal/jsonlit`):
 - `{}` → `map[string]any{}`
 
 ```go
-v, err := e.Eval(ctx, `{"items": [1, 2, 3], "ok": true}`, env)
+p, err := expr.Compile(`{"items": [1, 2, 3], "ok": true}`)
+v, err := p.Run(ctx, env)
 ```
 
 The rewrite leaves strings, runes, comments, and already-typed Go

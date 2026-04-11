@@ -47,7 +47,7 @@ var benchExprs = []struct {
 // ------- deepnoodle/expr (ours) -------
 
 func BenchmarkDNCompile(b *testing.B) {
-	opts := []dn.CompileOption{dn.WithBuiltins()}
+	opts := []dn.Option{dn.WithBuiltins()}
 	for _, bc := range benchExprs {
 		b.Run(bc.name, func(b *testing.B) {
 			b.ReportAllocs()
@@ -62,7 +62,7 @@ func BenchmarkDNCompile(b *testing.B) {
 }
 
 func BenchmarkDNRun(b *testing.B) {
-	opts := []dn.CompileOption{dn.WithBuiltins()}
+	opts := []dn.Option{dn.WithBuiltins()}
 	env := benchEnv()
 	ctx := context.Background()
 	for _, bc := range benchExprs {

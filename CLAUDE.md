@@ -18,7 +18,7 @@ parameter interpolation.
 
 | File              | Purpose                                                          |
 | ----------------- | ---------------------------------------------------------------- |
-| `engine.go`       | `Compile`/`Eval`, `CompileOption`, `map` keyword preprocessing |
+| `engine.go`       | `Compile`, `Option`, `map` keyword preprocessing                 |
 | `program.go`      | AST walker — the evaluator                                       |
 | `reflect.go`      | Env lookup, function dispatch, type coercion                     |
 | `builtins.go`     | Default function set exposed by `Builtins()` / `WithBuiltins()`  |

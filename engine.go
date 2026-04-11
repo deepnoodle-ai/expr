@@ -8,18 +8,14 @@
 //
 // # Evaluating an expression
 //
-// [Eval] compiles and runs in one step:
+// [Compile] parses an expression once and returns a [*Program] that can
+// be run against many inputs. Programs are immutable and safe for
+// concurrent evaluation.
 //
-//	v, err := expr.Eval(ctx, "upper(user.name)", env,
+//	p, err := expr.Compile("upper(user.name)",
 //	    expr.WithBuiltins(),
 //	    expr.WithFunctions(map[string]any{"upper": strings.ToUpper}),
 //	)
-//
-// When the same expression will run against many inputs, compile once
-// and reuse the [*Program]. Programs are immutable and safe for
-// concurrent evaluation.
-//
-//	p, err := expr.Compile("state.count * inputs.multiplier", expr.WithBuiltins())
 //	v, err := p.Run(ctx, env)
 //
 // # Environments
@@ -37,7 +33,6 @@
 package expr
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"go/parser"
@@ -65,10 +60,10 @@ const MaxSourceLength = 64 * 1024
 // hand-written expression and keeps the Go stack well under 1 MiB.
 const MaxEvalDepth = 256
 
-// CompileOption configures a Compile or Eval call. Options are applied
-// in order, so a later WithFunctions overrides an earlier WithBuiltins
-// for any shared name.
-type CompileOption func(*compileConfig)
+// Option configures a [Compile] or [NewTemplate] call. Options are
+// applied in order, so a later WithFunctions overrides an earlier
+// WithBuiltins for any shared name.
+type Option func(*compileConfig)
 
 // compileConfig is the resolved set of options for a single Compile.
 // It is consumed during parsing to build the function dispatch tables
@@ -89,7 +84,7 @@ func newCompileConfig() *compileConfig {
 // [Builtins]. Pair it with [WithFunctions] to extend or override individual
 // entries; options apply in the order they are passed, so a later
 // WithFunctions wins over an earlier WithBuiltins for any shared name.
-func WithBuiltins() CompileOption {
+func WithBuiltins() Option {
 	return WithFunctions(Builtins())
 }
 
@@ -101,7 +96,7 @@ func WithBuiltins() CompileOption {
 // values to the declared parameter types at call time. Return signatures of
 // `T`, `(T, error)`, and `()` are supported. Variadic functions are also
 // supported.
-func WithFunctions(funcs map[string]any) CompileOption {
+func WithFunctions(funcs map[string]any) Option {
 	return func(c *compileConfig) {
 		for name, fn := range funcs {
 			c.funcs[name] = fn
@@ -122,10 +117,10 @@ func WithFunctions(funcs map[string]any) CompileOption {
 // Program is immutable and safe for concurrent use. Input longer than
 // MaxSourceLength is rejected without calling the parser.
 //
-// Functions are registered via CompileOptions and baked into the returned
+// Functions are registered via Options and baked into the returned
 // Program. JSON-style array and object literals ([1, 2, 3], {"k": v}) are
 // always accepted; see docs/SPEC.md for the exact rules.
-func Compile(code string, opts ...CompileOption) (*Program, error) {
+func Compile(code string, opts ...Option) (*Program, error) {
 	if len(code) > MaxSourceLength {
 		return nil, fmt.Errorf("%w: source length %d exceeds maximum %d",
 			ErrCompile, len(code), MaxSourceLength)
@@ -142,21 +137,6 @@ func Compile(code string, opts ...CompileOption) (*Program, error) {
 	p := &Program{source: code, root: node, funcs: cfg.funcs, prepared: cfg.prepared}
 	p.compile()
 	return p, nil
-}
-
-// Eval compiles and runs code in one step. Prefer Compile+Run when the
-// same expression will be evaluated multiple times.
-//
-// env may be a map[string]any, a struct, or a pointer to a struct; see
-// [Program.Run] for details. ctx is threaded into evaluation and auto-
-// injected into registered functions whose first parameter is
-// context.Context.
-func Eval(ctx context.Context, code string, env any, opts ...CompileOption) (any, error) {
-	p, err := Compile(code, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return p.Run(ctx, env)
 }
 
 // mapFormName is the internal identifier that source-level `map(`

@@ -11,12 +11,13 @@ program.
 go get github.com/deepnoodle-ai/expr
 ```
 
-## Default built-ins
+## Quickstart
 
-`Compile` and `Eval` take options. No functions are registered by
-default — pass `WithBuiltins` to opt in to the standard set: `len`,
-`contains`, `has`, `keys`, `upper`, `lower`, `int`, `float`, `string`,
-`bool`, `sprintf`.
+`Compile` parses an expression once and returns a `*Program` that can
+be run against many inputs. Programs are immutable and safe for
+concurrent use. No functions are registered by default — pass
+`WithBuiltins` to opt in to the standard set: `len`, `contains`, `has`,
+`keys`, `upper`, `lower`, `int`, `float`, `string`, `bool`, `sprintf`.
 
 ```go
 package main
@@ -31,6 +32,14 @@ import (
 func main() {
 	ctx := context.Background()
 
+	p, err := expr.Compile(
+		`user.age >= 18 && contains(user.roles, "admin")`,
+		expr.WithBuiltins(),
+	)
+	if err != nil {
+		panic(err)
+	}
+
 	env := map[string]any{
 		"user": map[string]any{
 			"name":  "ada",
@@ -39,7 +48,7 @@ func main() {
 		},
 	}
 
-	v, err := expr.Eval(ctx, `user.age >= 18 && contains(user.roles, "admin")`, env, expr.WithBuiltins())
+	v, err := p.Run(ctx, env)
 	if err != nil {
 		panic(err)
 	}
@@ -51,7 +60,7 @@ Runnable copy: [`examples/basic`](examples/basic).
 
 ## Struct environments
 
-The env passed to `Eval` can also be a struct (or a pointer to one).
+The env passed to `Run` can also be a struct (or a pointer to one).
 Exported fields and zero-argument methods are both reachable as
 identifiers inside the expression.
 
@@ -97,7 +106,11 @@ func main() {
 		},
 	}
 
-	v, err := expr.Eval(ctx, `Subtotal() > 100 && len(Items) >= 2`, order, expr.WithBuiltins())
+	p, err := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins())
+	if err != nil {
+		panic(err)
+	}
+	v, err := p.Run(ctx, order)
 	if err != nil {
 		panic(err)
 	}
@@ -129,13 +142,17 @@ func main() {
 
 	env := map[string]any{"name": "ada"}
 
-	v, err := expr.Eval(ctx, `greet(upper(name))`, env, expr.WithFunctions(map[string]any{
+	p, err := expr.Compile(`greet(upper(name))`, expr.WithFunctions(map[string]any{
 		"upper":     strings.ToUpper,
 		"hasPrefix": strings.HasPrefix,
 		"greet": func(name string) string {
 			return "Hello, " + name + "!"
 		},
 	}))
+	if err != nil {
+		panic(err)
+	}
+	v, err := p.Run(ctx, env)
 	if err != nil {
 		panic(err)
 	}

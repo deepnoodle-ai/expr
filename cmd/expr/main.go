@@ -55,7 +55,11 @@ func runEval(ctx *cli.Context) error {
 		return cli.Errorf("load input: %v", err)
 	}
 
-	result, err := expr.Eval(ctx.Context(), source, env, expr.WithBuiltins())
+	program, err := expr.Compile(source, expr.WithBuiltins())
+	if err != nil {
+		return cli.Errorf("%v", err)
+	}
+	result, err := program.Run(ctx.Context(), env)
 	if err != nil {
 		return cli.Errorf("%v", err)
 	}

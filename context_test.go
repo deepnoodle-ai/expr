@@ -32,13 +32,13 @@ func TestRun_CancelMidEvaluation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"stop": func() bool { cancel(); return true },
 	})}
 
 	// `+` is not short-circuited, so the right-hand eval call must run
 	// after stop() returns — and it's where the ctx.Err() check fires.
-	_, err := Eval(ctx, "stop() && 1 < 2", nil, opts...)
+	_, err := evalExpr(ctx, "stop() && 1 < 2", nil, opts...)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -50,7 +50,7 @@ func TestRun_DeadlineExceeded(t *testing.T) {
 	// Busy-wait one tick so the deadline is guaranteed past.
 	time.Sleep(time.Millisecond)
 
-	_, err := Eval(ctx, "1 + 2", nil)
+	_, err := evalExpr(ctx, "1 + 2", nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
@@ -72,13 +72,13 @@ func TestCtxInjection_ZeroArgFunc(t *testing.T) {
 	ctx := context.WithValue(context.Background(), key{}, "marker")
 
 	var seen any
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"probe": func(c context.Context) string {
 			seen = c.Value(key{})
 			return "ok"
 		},
 	})}
-	v, err := Eval(ctx, "probe()", nil, opts...)
+	v, err := evalExpr(ctx, "probe()", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "ok", v)
 	require.Equal(t, "marker", seen)
@@ -89,10 +89,10 @@ func TestCtxInjection_ZeroArgFunc(t *testing.T) {
 // The user function returns int, and expr does not re-coerce return
 // values — the concrete Go type is preserved to the caller.
 func TestCtxInjection_WithArgs(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"add": func(_ context.Context, a, b int) int { return a + b },
 	})}
-	v, err := Eval(context.Background(), "add(2, 3)", nil, opts...)
+	v, err := evalExpr(context.Background(), "add(2, 3)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int(5), v)
 }
@@ -102,10 +102,10 @@ func TestCtxInjection_WithArgs(t *testing.T) {
 // A caller who passes one arg too few should see "expects 2 args" for a
 // `func(ctx, a, b)` signature.
 func TestCtxInjection_ArgCountErrorExcludesCtx(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"add": func(_ context.Context, a, b int) int { return a + b },
 	})}
-	_, err := Eval(context.Background(), "add(1)", nil, opts...)
+	_, err := evalExpr(context.Background(), "add(1)", nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "expects 2 args")
 }
@@ -114,7 +114,7 @@ func TestCtxInjection_ArgCountErrorExcludesCtx(t *testing.T) {
 // variadic tails: `func(ctx, prefix, vals...)` works from the expression
 // `tag("k", 1, 2, 3)`.
 func TestCtxInjection_Variadic(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"sum": func(_ context.Context, prefix string, xs ...int) string {
 			total := 0
 			for _, x := range xs {
@@ -123,7 +123,7 @@ func TestCtxInjection_Variadic(t *testing.T) {
 			return prefix
 		},
 	})}
-	v, err := Eval(context.Background(), `sum("k", 1, 2, 3)`, nil, opts...)
+	v, err := evalExpr(context.Background(), `sum("k", 1, 2, 3)`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "k", v)
 }
@@ -133,10 +133,10 @@ func TestCtxInjection_Variadic(t *testing.T) {
 // in any other position should be treated as an ordinary arg (and fail
 // with a clear type error when expression args can't satisfy it).
 func TestCtxInjection_NotFirstParam(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"weird": func(a int, _ context.Context) int { return a },
 	})}
-	_, err := Eval(context.Background(), "weird(1)", nil, opts...)
+	_, err := evalExpr(context.Background(), "weird(1)", nil, opts...)
 	// Arity check fires: the declared arity is 2, caller supplied 1.
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "expects 2 args")
@@ -146,10 +146,10 @@ func TestCtxInjection_NotFirstParam(t *testing.T) {
 // ctx parameter still works exactly as before — the injection branch is
 // a no-op for it.
 func TestCtxInjection_NonCtxFuncUnchanged(t *testing.T) {
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"double": func(x int) int { return x * 2 },
 	})}
-	v, err := Eval(context.Background(), "double(21)", nil, opts...)
+	v, err := evalExpr(context.Background(), "double(21)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int(42), v)
 }
@@ -162,7 +162,7 @@ func TestCtxInjection_CtxCancelPropagatesToUserFunc(t *testing.T) {
 	blocked := make(chan struct{})
 	// (T, error) return so expr propagates the error instead of
 	// returning it as a value.
-	opts := []CompileOption{WithFunctions(map[string]any{
+	opts := []Option{WithFunctions(map[string]any{
 		"wait": func(c context.Context) (any, error) {
 			close(blocked)
 			<-c.Done()
@@ -172,7 +172,7 @@ func TestCtxInjection_CtxCancelPropagatesToUserFunc(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := Eval(ctx, "wait()", nil, opts...)
+		_, err := evalExpr(ctx, "wait()", nil, opts...)
 		done <- err
 	}()
 

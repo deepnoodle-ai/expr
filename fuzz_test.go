@@ -118,7 +118,7 @@ func fuzzEnv() map[string]any {
 // either a valid program or an ErrCompile. Anything else (panic, nil
 // program with nil error, wrong error class) is a test failure.
 func FuzzCompile(f *testing.F) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	for _, s := range fuzzCorpus {
 		f.Add(s)
 	}
@@ -139,7 +139,7 @@ func FuzzCompile(f *testing.F) {
 // FuzzEval exercises Compile+Run. Any panic crashes the fuzzer; any
 // error must wrap ErrCompile or ErrEvaluate.
 func FuzzEval(f *testing.F) {
-	opts := []CompileOption{WithBuiltins()}
+	opts := []Option{WithBuiltins()}
 	for _, s := range fuzzCorpus {
 		f.Add(s)
 	}

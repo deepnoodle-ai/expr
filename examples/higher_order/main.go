@@ -17,7 +17,7 @@ func main() {
 	// The map/filter/any/all/find/count forms are always registered.
 	// WithBuiltins is added so the `sprintf` builtin is also available
 	// for the indexed-format example below.
-	opts := []expr.CompileOption{expr.WithBuiltins()}
+	opts := []expr.Option{expr.WithBuiltins()}
 
 	env := map[string]any{
 		"users": []any{
@@ -59,7 +59,12 @@ func main() {
 
 	fmt.Println("higher-order expressions:")
 	for _, code := range exprs {
-		v, err := expr.Eval(ctx, code, env, opts...)
+		p, err := expr.Compile(code, opts...)
+		if err != nil {
+			fmt.Printf("  %-52s  ERROR: %v\n", code, err)
+			continue
+		}
+		v, err := p.Run(ctx, env)
 		if err != nil {
 			fmt.Printf("  %-52s  ERROR: %v\n", code, err)
 			continue
