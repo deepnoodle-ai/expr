@@ -16,9 +16,9 @@ import (
 	"github.com/deepnoodle-ai/expr"
 )
 
-// eng is shared across every benchmark so startup cost is not folded
+// engOpts is shared across every benchmark so startup cost is not folded
 // into steady-state measurements.
-var eng = expr.New(expr.WithBuiltins())
+var engOpts = []expr.CompileOption{expr.WithBuiltins()}
 
 func Benchmark_expr(b *testing.B) {
 	params := map[string]any{
@@ -28,7 +28,7 @@ func Benchmark_expr(b *testing.B) {
 		"Value":   100,
 	}
 
-	program, err := eng.Compile(`(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`)
+	program, err := expr.Compile(`(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func Benchmark_expr_eval(b *testing.B) {
 
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		out, err = eng.Eval(ctx, `(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`, params)
+		out, err = expr.Eval(ctx, `(Origin == "MOW" || Country == "RU") && (Value >= 100 || Adults == 1)`, params, engOpts...)
 	}
 	b.StopTimer()
 
@@ -81,7 +81,7 @@ func Benchmark_len(b *testing.B) {
 		"arr": make([]int, 100),
 	}
 
-	program, err := eng.Compile(`len(arr)`)
+	program, err := expr.Compile(`len(arr)`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func Benchmark_filter(b *testing.B) {
 	}
 	env := map[string]any{"Ints": ints}
 
-	program, err := eng.Compile(`filter(Ints, it % 7 == 0)`)
+	program, err := expr.Compile(`filter(Ints, it % 7 == 0)`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func Benchmark_filterLen(b *testing.B) {
 	}
 	env := map[string]any{"Ints": ints}
 
-	program, err := eng.Compile(`len(filter(Ints, it % 7 == 0))`)
+	program, err := expr.Compile(`len(filter(Ints, it % 7 == 0))`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func Benchmark_filterFirst(b *testing.B) {
 	}
 	env := map[string]any{"Ints": ints}
 
-	program, err := eng.Compile(`filter(Ints, it % 7 == 0)[0]`)
+	program, err := expr.Compile(`filter(Ints, it % 7 == 0)[0]`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func Benchmark_filterMap(b *testing.B) {
 	}
 	env := map[string]any{"Ints": ints}
 
-	program, err := eng.Compile(`map(filter(Ints, it % 7 == 0), it * 2)`)
+	program, err := expr.Compile(`map(filter(Ints, it % 7 == 0), it * 2)`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func Benchmark_arrayIndex(b *testing.B) {
 	}
 	env := map[string]any{"arr": arr}
 
-	program, err := eng.Compile(`arr[50]`)
+	program, err := expr.Compile(`arr[50]`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -251,7 +251,7 @@ type priceEnv struct {
 }
 
 func Benchmark_envStruct(b *testing.B) {
-	program, err := eng.Compile(`Price.Value > 0`)
+	program, err := expr.Compile(`Price.Value > 0`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func Benchmark_envMap(b *testing.B) {
 		"price": Price{Value: 1},
 	}
 
-	program, err := eng.Compile(`price.Value > 0`)
+	program, err := expr.Compile(`price.Value > 0`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func (CallFoo) Method() string {
 }
 
 func Benchmark_callFunc(b *testing.B) {
-	program, err := eng.Compile(`Func()`)
+	program, err := expr.Compile(`Func()`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func Benchmark_callFunc(b *testing.B) {
 }
 
 func Benchmark_callMethod(b *testing.B) {
-	program, err := eng.Compile(`Foo.Method()`)
+	program, err := expr.Compile(`Foo.Method()`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func Benchmark_callMethod(b *testing.B) {
 }
 
 func Benchmark_callField(b *testing.B) {
-	program, err := eng.Compile(`Fn()`)
+	program, err := expr.Compile(`Fn()`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func Benchmark_largeStructAccess(b *testing.B) {
 		Field int
 	}
 
-	program, err := eng.Compile(`Field > 0 && Field > 1 && Field < 99`)
+	program, err := expr.Compile(`Field > 0 && Field > 1 && Field < 99`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func Benchmark_largeNestedStructAccess(b *testing.B) {
 		}
 	}
 
-	program, err := eng.Compile(`Inner.Field > 0 && Inner.Field > 1 && Inner.Field < 99`)
+	program, err := expr.Compile(`Inner.Field > 0 && Inner.Field > 1 && Inner.Field < 99`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func Benchmark_largeNestedArrayAccess(b *testing.B) {
 		Data [1][1024 * 1024 * 10]byte
 	}
 
-	program, err := eng.Compile(`Data[0][0] > 0`)
+	program, err := expr.Compile(`Data[0][0] > 0`, engOpts...)
 	if err != nil {
 		b.Fatal(err)
 	}

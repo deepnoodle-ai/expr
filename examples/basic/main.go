@@ -10,8 +10,6 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
 	env := map[string]any{
 		"user": map[string]any{
 			"name":  "ada",
@@ -20,7 +18,7 @@ func main() {
 		},
 	}
 
-	v, err := e.Eval(ctx, `user.age >= 18 && contains(user.roles, "admin")`, env)
+	v, err := expr.Eval(ctx, `user.age >= 18 && contains(user.roles, "admin")`, env, expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}

@@ -30,8 +30,6 @@ func (o Order) Subtotal() float64 {
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
 	order := Order{
 		ID:       "A-1042",
 		Customer: "Ada Lovelace",
@@ -41,7 +39,7 @@ func main() {
 		},
 	}
 
-	v, err := e.Eval(ctx, `Subtotal() > 100 && len(Items) >= 2`, order)
+	v, err := expr.Eval(ctx, `Subtotal() > 100 && len(Items) >= 2`, order, expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}

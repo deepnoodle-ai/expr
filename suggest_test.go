@@ -19,14 +19,13 @@ func TestSuggest_UndefinedIdentDidYouMean(t *testing.T) {
 
 func TestSuggest_UndefinedIdentAvailableList(t *testing.T) {
 	// Small candidate set with no close match: the hint falls back to
-	// listing the available names. A fresh New() has no functions
-	// registered, so the only candidates are the env entries plus the
+	// listing the available names. With no CompileOptions there are no
+	// functions registered, so the only candidates are the env entries plus the
 	// 6 higher-order form names. Two env entries keeps the total under
 	// the 8-name cap that formatHint uses to decide whether a list is
 	// short enough to be useful.
-	e := New()
 	env := map[string]any{"alpha": 1, "beta": 2}
-	_, err := e.Eval(t.Context(), "zzz", env)
+	_, err := Eval(t.Context(), "zzz", env)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), `undefined identifier "zzz"`)
 	require.Contains(t, err.Error(), "available:")
@@ -66,8 +65,8 @@ func TestSuggest_MissingMapKeyByIndex(t *testing.T) {
 func TestSuggest_UnknownFunction(t *testing.T) {
 	// `lowre` should suggest `lower` (builtin). Opts in to WithBuiltins
 	// so `lower` is actually in the candidate set.
-	e := New(WithBuiltins())
-	_, err := e.Eval(t.Context(), `lowre("FOO")`, nil)
+	opts := []CompileOption{WithBuiltins()}
+	_, err := Eval(t.Context(), `lowre("FOO")`, nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), `unknown function "lowre"`)
 	require.Contains(t, err.Error(), `did you mean "lower"?`)

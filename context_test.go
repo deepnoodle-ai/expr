@@ -32,13 +32,13 @@ func TestRun_CancelMidEvaluation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"stop": func() bool { cancel(); return true },
-	}))
+	})}
 
 	// `+` is not short-circuited, so the right-hand eval call must run
 	// after stop() returns — and it's where the ctx.Err() check fires.
-	_, err := e.Eval(ctx, "stop() && 1 < 2", nil)
+	_, err := Eval(ctx, "stop() && 1 < 2", nil, opts...)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -72,13 +72,13 @@ func TestCtxInjection_ZeroArgFunc(t *testing.T) {
 	ctx := context.WithValue(context.Background(), key{}, "marker")
 
 	var seen any
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"probe": func(c context.Context) string {
 			seen = c.Value(key{})
 			return "ok"
 		},
-	}))
-	v, err := e.Eval(ctx, "probe()", nil)
+	})}
+	v, err := Eval(ctx, "probe()", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "ok", v)
 	require.Equal(t, "marker", seen)
@@ -89,10 +89,10 @@ func TestCtxInjection_ZeroArgFunc(t *testing.T) {
 // The user function returns int, and expr does not re-coerce return
 // values — the concrete Go type is preserved to the caller.
 func TestCtxInjection_WithArgs(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"add": func(_ context.Context, a, b int) int { return a + b },
-	}))
-	v, err := e.Eval(context.Background(), "add(2, 3)", nil)
+	})}
+	v, err := Eval(context.Background(), "add(2, 3)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int(5), v)
 }
@@ -102,10 +102,10 @@ func TestCtxInjection_WithArgs(t *testing.T) {
 // A caller who passes one arg too few should see "expects 2 args" for a
 // `func(ctx, a, b)` signature.
 func TestCtxInjection_ArgCountErrorExcludesCtx(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"add": func(_ context.Context, a, b int) int { return a + b },
-	}))
-	_, err := e.Eval(context.Background(), "add(1)", nil)
+	})}
+	_, err := Eval(context.Background(), "add(1)", nil, opts...)
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "expects 2 args")
 }
@@ -114,7 +114,7 @@ func TestCtxInjection_ArgCountErrorExcludesCtx(t *testing.T) {
 // variadic tails: `func(ctx, prefix, vals...)` works from the expression
 // `tag("k", 1, 2, 3)`.
 func TestCtxInjection_Variadic(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"sum": func(_ context.Context, prefix string, xs ...int) string {
 			total := 0
 			for _, x := range xs {
@@ -122,8 +122,8 @@ func TestCtxInjection_Variadic(t *testing.T) {
 			}
 			return prefix
 		},
-	}))
-	v, err := e.Eval(context.Background(), `sum("k", 1, 2, 3)`, nil)
+	})}
+	v, err := Eval(context.Background(), `sum("k", 1, 2, 3)`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "k", v)
 }
@@ -133,10 +133,10 @@ func TestCtxInjection_Variadic(t *testing.T) {
 // in any other position should be treated as an ordinary arg (and fail
 // with a clear type error when expression args can't satisfy it).
 func TestCtxInjection_NotFirstParam(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"weird": func(a int, _ context.Context) int { return a },
-	}))
-	_, err := e.Eval(context.Background(), "weird(1)", nil)
+	})}
+	_, err := Eval(context.Background(), "weird(1)", nil, opts...)
 	// Arity check fires: the declared arity is 2, caller supplied 1.
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), "expects 2 args")
@@ -146,10 +146,10 @@ func TestCtxInjection_NotFirstParam(t *testing.T) {
 // ctx parameter still works exactly as before — the injection branch is
 // a no-op for it.
 func TestCtxInjection_NonCtxFuncUnchanged(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"double": func(x int) int { return x * 2 },
-	}))
-	v, err := e.Eval(context.Background(), "double(21)", nil)
+	})}
+	v, err := Eval(context.Background(), "double(21)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int(42), v)
 }
@@ -162,17 +162,17 @@ func TestCtxInjection_CtxCancelPropagatesToUserFunc(t *testing.T) {
 	blocked := make(chan struct{})
 	// (T, error) return so expr propagates the error instead of
 	// returning it as a value.
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"wait": func(c context.Context) (any, error) {
 			close(blocked)
 			<-c.Done()
 			return nil, c.Err()
 		},
-	}))
+	})}
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := e.Eval(ctx, "wait()", nil)
+		_, err := Eval(ctx, "wait()", nil, opts...)
 		done <- err
 	}()
 
@@ -187,17 +187,15 @@ func TestCtxInjection_CtxCancelPropagatesToUserFunc(t *testing.T) {
 	}
 }
 
-// TestCompiler_RunHonorsCtx ensures Script.Run threads ctx into the
-// program so host-side cancellation is observed through the interface.
-func TestCompiler_RunHonorsCtx(t *testing.T) {
-	cmp := New().Compiler()
-
-	s, err := cmp.Compile("1 + 2")
+// TestProgram_RunHonorsCtx ensures Program.Run threads ctx so
+// host-side cancellation is observed.
+func TestProgram_RunHonorsCtx(t *testing.T) {
+	p, err := Compile("1 + 2")
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err = s.Run(ctx, nil)
+	_, err = p.Run(ctx, nil)
 	require.ErrorIs(t, err, context.Canceled)
 }

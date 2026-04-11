@@ -134,13 +134,13 @@ func TestReflect_NilFunctionFieldValue(t *testing.T) {
 
 // Ints should never silently wrap when narrowing to a smaller type.
 func TestConvert_IntOverflowRejected(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n },
 		"u8":  func(n uint8) uint8 { return n },
 		"u16": func(n uint16) uint16 { return n },
 		"u32": func(n uint32) uint32 { return n },
 		"i32": func(n int32) int32 { return n },
-	}))
+	})}
 	cases := []struct {
 		expr string
 	}{
@@ -154,7 +154,7 @@ func TestConvert_IntOverflowRejected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			_, err := e.Eval(t.Context(), tc.expr, nil)
+			_, err := Eval(t.Context(), tc.expr, nil, opts...)
 			require.Error(t, err, "%s should reject overflow", tc.expr)
 			require.ErrorIs(t, err, ErrEvaluate)
 		})
@@ -162,11 +162,11 @@ func TestConvert_IntOverflowRejected(t *testing.T) {
 }
 
 func TestConvert_IntInRangeAllowed(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n },
 		"u8":  func(n uint8) uint8 { return n },
 		"i32": func(n int32) int32 { return n },
-	}))
+	})}
 	cases := []struct {
 		expr string
 		want any
@@ -179,7 +179,7 @@ func TestConvert_IntInRangeAllowed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := e.Eval(t.Context(), tc.expr, nil)
+			got, err := Eval(t.Context(), tc.expr, nil, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -187,50 +187,50 @@ func TestConvert_IntInRangeAllowed(t *testing.T) {
 }
 
 func TestConvert_FloatToIntRange(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"i8":  func(n int8) int8 { return n },
 		"i64": func(n int64) int64 { return n },
-	}))
+	})}
 	// Truncation toward zero is intentional.
-	got, err := e.Eval(t.Context(), "i8(3.9)", nil)
+	got, err := Eval(t.Context(), "i8(3.9)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(3), got)
 
-	got, err = e.Eval(t.Context(), "i8(-3.9)", nil)
+	got, err = Eval(t.Context(), "i8(-3.9)", nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(-3), got)
 
 	// Out-of-range float → target int kind.
-	_, err = e.Eval(t.Context(), "i8(1000.0)", nil)
+	_, err = Eval(t.Context(), "i8(1000.0)", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestConvert_NaNAndInfRejected(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"i32":  func(n int32) int32 { return n },
 		"makeNaN": func() float64 { return math.NaN() },
 		"makeInf": func() float64 { return math.Inf(1) },
-	}))
-	_, err := e.Eval(t.Context(), "i32(makeNaN())", nil)
+	})}
+	_, err := Eval(t.Context(), "i32(makeNaN())", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 
-	_, err = e.Eval(t.Context(), "i32(makeInf())", nil)
+	_, err = Eval(t.Context(), "i32(makeInf())", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 func TestConvert_UintSource(t *testing.T) {
 	// env may supply uint values; they must narrow with the same checks.
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"i8": func(n int8) int8 { return n },
-	}))
-	_, err := e.Eval(t.Context(), "i8(v)", map[string]any{"v": uint64(300)})
+	})}
+	_, err := Eval(t.Context(), "i8(v)", map[string]any{"v": uint64(300)}, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrEvaluate)
 
-	got, err := e.Eval(t.Context(), "i8(v)", map[string]any{"v": uint64(100)})
+	got, err := Eval(t.Context(), "i8(v)", map[string]any{"v": uint64(100)}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int8(100), got)
 }
@@ -310,11 +310,11 @@ func TestMap_InterfaceKeys(t *testing.T) {
 func TestUserCode_PanicIsNotOurBug(t *testing.T) {
 	// The engine does not recover panics from user code — documented in
 	// the spec. Pin the current behavior so changes are deliberate.
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"boom": func() int { panic("nope") },
-	}))
+	})}
 	require.Panics(t, func() {
-		_, _ = e.Eval(t.Context(), "boom()", nil)
+		_, _ = Eval(t.Context(), "boom()", nil, opts...)
 	})
 }
 
@@ -341,10 +341,10 @@ func (w wrappedErr) Unwrap() error { return w.inner }
 
 func TestUserError_UnwrapChainPreserved(t *testing.T) {
 	sentinel := errors.New("root")
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"fail": func() (int, error) { return 0, wrappedErr{inner: sentinel} },
-	}))
-	_, err := e.Eval(t.Context(), "fail()", nil)
+	})}
+	_, err := Eval(t.Context(), "fail()", nil, opts...)
 	require.Error(t, err)
 	require.ErrorIs(t, err, sentinel)
 }

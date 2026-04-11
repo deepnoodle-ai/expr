@@ -13,9 +13,10 @@ go get github.com/deepnoodle-ai/expr
 
 ## Default built-ins
 
-A fresh engine has no functions registered. Pass `WithBuiltins` to opt in
-to the standard set: `len`, `contains`, `has`, `keys`, `upper`, `lower`,
-`int`, `float`, `string`, `bool`, `sprintf`.
+`Compile` and `Eval` take options. No functions are registered by
+default — pass `WithBuiltins` to opt in to the standard set: `len`,
+`contains`, `has`, `keys`, `upper`, `lower`, `int`, `float`, `string`,
+`bool`, `sprintf`.
 
 ```go
 package main
@@ -30,8 +31,6 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
 	env := map[string]any{
 		"user": map[string]any{
 			"name":  "ada",
@@ -40,7 +39,7 @@ func main() {
 		},
 	}
 
-	v, err := e.Eval(ctx, `user.age >= 18 && contains(user.roles, "admin")`, env)
+	v, err := expr.Eval(ctx, `user.age >= 18 && contains(user.roles, "admin")`, env, expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}
@@ -89,8 +88,6 @@ func (o Order) Subtotal() float64 {
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
 	order := Order{
 		ID:       "A-1042",
 		Customer: "Ada Lovelace",
@@ -100,7 +97,7 @@ func main() {
 		},
 	}
 
-	v, err := e.Eval(ctx, `Subtotal() > 100 && len(Items) >= 2`, order)
+	v, err := expr.Eval(ctx, `Subtotal() > 100 && len(Items) >= 2`, order, expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}
@@ -130,17 +127,15 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithFunctions(map[string]any{
+	env := map[string]any{"name": "ada"}
+
+	v, err := expr.Eval(ctx, `greet(upper(name))`, env, expr.WithFunctions(map[string]any{
 		"upper":     strings.ToUpper,
 		"hasPrefix": strings.HasPrefix,
 		"greet": func(name string) string {
 			return "Hello, " + name + "!"
 		},
 	}))
-
-	env := map[string]any{"name": "ada"}
-
-	v, err := e.Eval(ctx, `greet(upper(name))`, env)
 	if err != nil {
 		panic(err)
 	}
@@ -169,9 +164,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
-	pred, err := e.Compile(`age >= 18 && contains(roles, "admin")`)
+	pred, err := expr.Compile(`age >= 18 && contains(roles, "admin")`, expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}
@@ -209,10 +202,9 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
-	tmpl, err := expr.NewTemplate(e.Compiler(),
-		`Hello ${user.name}! You have ${len(user.tasks)} task(s).`)
+	tmpl, err := expr.NewTemplate(
+		`Hello ${user.name}! You have ${len(user.tasks)} task(s).`,
+		expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}

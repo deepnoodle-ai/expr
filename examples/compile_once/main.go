@@ -10,9 +10,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
-	pred, err := e.Compile(`age >= 18 && contains(roles, "admin")`)
+	pred, err := expr.Compile(`age >= 18 && contains(roles, "admin")`, expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}

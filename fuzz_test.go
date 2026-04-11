@@ -118,12 +118,12 @@ func fuzzEnv() map[string]any {
 // either a valid program or an ErrCompile. Anything else (panic, nil
 // program with nil error, wrong error class) is a test failure.
 func FuzzCompile(f *testing.F) {
-	e := New(WithBuiltins())
+	opts := []CompileOption{WithBuiltins()}
 	for _, s := range fuzzCorpus {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, src string) {
-		prog, err := e.Compile(src)
+		prog, err := Compile(src, opts...)
 		if err != nil {
 			if !errors.Is(err, ErrCompile) {
 				t.Fatalf("Compile returned non-ErrCompile error: %v", err)
@@ -139,13 +139,13 @@ func FuzzCompile(f *testing.F) {
 // FuzzEval exercises Compile+Run. Any panic crashes the fuzzer; any
 // error must wrap ErrCompile or ErrEvaluate.
 func FuzzEval(f *testing.F) {
-	e := New(WithBuiltins())
+	opts := []CompileOption{WithBuiltins()}
 	for _, s := range fuzzCorpus {
 		f.Add(s)
 	}
 	env := fuzzEnv()
 	f.Fuzz(func(t *testing.T, src string) {
-		prog, err := e.Compile(src)
+		prog, err := Compile(src, opts...)
 		if err != nil {
 			if !errors.Is(err, ErrCompile) {
 				t.Fatalf("Compile returned non-ErrCompile error: %v", err)
