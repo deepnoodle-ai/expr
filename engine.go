@@ -6,21 +6,34 @@
 //
 // expr is intentionally small and adds no external dependencies.
 //
-// The package-level [Compile] and [Eval] take CompileOptions to register
-// functions. Opt in to the standard builtin set with [WithBuiltins],
-// supply your own with [WithFunctions], or mix both:
+// # Evaluating an expression
+//
+// [Eval] compiles and runs in one step:
 //
 //	v, err := expr.Eval(ctx, "upper(user.name)", env,
 //	    expr.WithBuiltins(),
 //	    expr.WithFunctions(map[string]any{"upper": strings.ToUpper}),
 //	)
 //
-// Compile once, evaluate many:
+// When the same expression will run against many inputs, compile once
+// and reuse the [*Program]. Programs are immutable and safe for
+// concurrent evaluation.
 //
 //	p, err := expr.Compile("state.count * inputs.multiplier", expr.WithBuiltins())
 //	v, err := p.Run(ctx, env)
 //
+// # Environments
+//
 // env may be a map[string]any, a struct, or a pointer to a struct.
+// Identifiers resolve to map keys, struct fields, or bound methods.
+// Callables stored in env are also invocable (see [Program.Run]).
+//
+// # Templates
+//
+// [NewTemplate] pre-compiles a `${...}` interpolator:
+//
+//	t, err := expr.NewTemplate("Hello ${user.name}!", expr.WithBuiltins())
+//	out, err := t.Render(ctx, env)
 package expr
 
 import (

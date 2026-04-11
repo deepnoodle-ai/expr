@@ -23,7 +23,7 @@ import (
 //	int(v)            numeric conversion to int64; strings parse strictly
 //	                  as base-10 integers
 //	float(v)          numeric conversion to float64; strings parse strictly
-//	bool(v)           truthiness check (matches IsTruthyValue)
+//	bool(v)           truthiness check (matches IsTruthy)
 //	contains(h, n)    substring for strings, element membership for
 //	                  slices/arrays (using loose numeric equality), or
 //	                  key presence for string-keyed maps
@@ -87,7 +87,7 @@ func nativeBool(_ context.Context, args []any) (any, error) {
 	if err := checkArity("bool", 1, len(args)); err != nil {
 		return nil, err
 	}
-	return IsTruthyValue(args[0]), nil
+	return IsTruthy(args[0]), nil
 }
 
 func nativeContains(_ context.Context, args []any) (any, error) {

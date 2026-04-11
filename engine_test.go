@@ -398,17 +398,57 @@ func TestEngine_ProgramRun(t *testing.T) {
 	v, err := p.Run(t.Context(), map[string]any{"state": map[string]any{"x": int64(10)}})
 	require.NoError(t, err)
 	require.Equal(t, true, v)
-	require.True(t, IsTruthyValue(v))
+	require.True(t, IsTruthy(v))
 }
 
 func TestEngine_Template(t *testing.T) {
 	tmpl, err := NewTemplate("Hello ${state.name}, you are ${state.age} years old")
 	require.NoError(t, err)
-	got, err := tmpl.Eval(t.Context(), map[string]any{
+	got, err := tmpl.Render(t.Context(), map[string]any{
 		"state": map[string]any{"name": "Alice", "age": int64(30)},
 	})
 	require.NoError(t, err)
 	require.Equal(t, "Hello Alice, you are 30 years old", got)
+}
+
+// Callables stored directly in env must be invocable as if they had
+// been registered via WithFunctions. This is the hybrid path: it
+// covers per-request closures and any host that wants to rebind
+// helpers on every Run without re-Compiling.
+func TestEval_EnvCallable(t *testing.T) {
+	env := map[string]any{
+		"name":  "ada",
+		"upper": strings.ToUpper,
+		"addN": func(n, m int) int { return n + m },
+		"greet": func(who string) (string, error) {
+			if who == "" {
+				return "", errors.New("empty name")
+			}
+			return "hi " + who, nil
+		},
+	}
+
+	v, err := Eval(t.Context(), `upper(name)`, env)
+	require.NoError(t, err)
+	require.Equal(t, "ADA", v)
+
+	v, err = Eval(t.Context(), `addN(2, 3)`, env)
+	require.NoError(t, err)
+	require.Equal(t, 5, v)
+
+	v, err = Eval(t.Context(), `greet(name)`, env)
+	require.NoError(t, err)
+	require.Equal(t, "hi ada", v)
+
+	_, err = Eval(t.Context(), `greet("")`, env)
+	require.Error(t, err)
+
+	// An env callable must shadow an identically-named registered
+	// function, matching the env→funcs lookup order.
+	v, err = Eval(t.Context(), `upper(name)`, env,
+		WithFunctions(map[string]any{"upper": strings.ToLower}))
+	require.NoError(t, err)
+	require.Equal(t, "ADA", v)
 }
 
 func TestEval_UndefinedIdentifier(t *testing.T) {

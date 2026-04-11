@@ -372,4 +372,4 @@ func isNilValue(v any) bool {
 	return false
 }
 
-func isTruthy(v any) bool { return IsTruthyValue(v) }
+func isTruthy(v any) bool { return IsTruthy(v) }

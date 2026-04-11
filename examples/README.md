@@ -10,7 +10,7 @@ of them with `go run ./examples/<name>`.
 | `structs/`      | struct envs with fields and bound methods                  |
 | `funcs/`        | registering custom Go functions as callable identifiers    |
 | `compile_once/` | compile once, evaluate many, the hot-path pattern          |
-| `template/`     | `${...}` string interpolation built on top of `Compiler`   |
+| `template/`     | `${...}` string interpolation via `NewTemplate` / `Render` |
 | `higher_order/` | `map` / `filter` / `any` / `all` / `find` / `count`        |
 
 Each of the first five directories corresponds to one of the code

@@ -49,7 +49,7 @@ var fuzzSeeds = []string{
 // don't need real evaluation — they just need to confirm the parser
 // never panics and produces a coherent Template that can be re-Eval'd
 // without crashing.
-func acceptAllCompile(string) (Script, error) { return acceptAllScript{}, nil }
+func acceptAllCompile(string) (runner, error) { return acceptAllScript{}, nil }
 
 type acceptAllScript struct{}
 
@@ -84,11 +84,11 @@ func FuzzTemplateParse(f *testing.F) {
 		if tmpl == nil {
 			t.Fatalf("nil template with nil error for %q", src)
 		}
-		if got := tmpl.Raw(); got != src {
-			t.Fatalf("Raw() drift: got %q want %q", got, src)
+		if got := tmpl.Source(); got != src {
+			t.Fatalf("Source() drift: got %q want %q", got, src)
 		}
-		if _, err := tmpl.Eval(context.Background(), nil); err != nil {
-			t.Fatalf("Eval error on accept-all compiler: %v", err)
+		if _, err := tmpl.Render(context.Background(), nil); err != nil {
+			t.Fatalf("Render error on accept-all compiler: %v", err)
 		}
 	})
 }
@@ -97,7 +97,7 @@ func FuzzTemplateParse(f *testing.F) {
 // script whose Run just echoes the body, so Eval exercises the
 // builder/formatting code against whatever chunks the parser
 // extracted.
-func echoCompile(body string) (Script, error) { return echoScript{body: body}, nil }
+func echoCompile(body string) (runner, error) { return echoScript{body: body}, nil }
 
 type echoScript struct{ body string }
 
@@ -118,9 +118,9 @@ func FuzzTemplateEval(f *testing.F) {
 		if err != nil {
 			return
 		}
-		out, err := tmpl.Eval(context.Background(), nil)
+		out, err := tmpl.Render(context.Background(), nil)
 		if err != nil {
-			t.Fatalf("Eval error for %q: %v", src, err)
+			t.Fatalf("Render error for %q: %v", src, err)
 		}
 		_ = out
 	})
