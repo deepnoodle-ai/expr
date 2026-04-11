@@ -67,8 +67,8 @@ func TestHigherOrder_All(t *testing.T) {
 	require.Equal(t, false, got)
 
 	// Uses the builtin `len`, so opt in with WithBuiltins.
-	e := New(WithBuiltins())
-	got, err = e.Eval(t.Context(), "all(users, len(it.Name) > 0)", env)
+	opts := []CompileOption{WithBuiltins()}
+	got, err = Eval(t.Context(), "all(users, len(it.Name) > 0)", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
 }
@@ -173,10 +173,10 @@ func TestHigherOrder_PredicateError(t *testing.T) {
 func TestHigherOrder_UserFuncOverride(t *testing.T) {
 	// User-registered `map` wins over the special form, matching the
 	// env→funcs identifier-resolution order used everywhere else.
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"map": func(xs []any) int { return len(xs) },
-	}))
-	got, err := e.Eval(t.Context(), "map(xs)", map[string]any{"xs": []any{int64(1), int64(2)}})
+	})}
+	got, err := Eval(t.Context(), "map(xs)", map[string]any{"xs": []any{int64(1), int64(2)}}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, int(2), got)
 }
@@ -197,11 +197,11 @@ func TestHigherOrder_CancelDuringIteration(t *testing.T) {
 	// return context.Canceled without wrapping it.
 	ctxC, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"stop": func() bool { cancel(); return true },
-	}))
+	})}
 	env := map[string]any{"xs": []any{int64(1), int64(2), int64(3), int64(4), int64(5)}}
-	_, err := e.Eval(ctxC, "map(xs, stop() && it)", env)
+	_, err := Eval(ctxC, "map(xs, stop() && it)", env, opts...)
 	require.True(t, errors.Is(err, context.Canceled),
 		"expected context.Canceled, got %v", err)
 }

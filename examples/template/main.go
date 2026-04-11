@@ -10,10 +10,9 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithBuiltins())
-
-	tmpl, err := expr.NewTemplate(e.Compiler(),
-		`Hello ${user.name}! You have ${len(user.tasks)} task(s).`)
+	tmpl, err := expr.NewTemplate(
+		`Hello ${user.name}! You have ${len(user.tasks)} task(s).`,
+		expr.WithBuiltins())
 	if err != nil {
 		panic(err)
 	}

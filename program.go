@@ -267,8 +267,7 @@ func (p *Program) eval(ctx context.Context, node ast.Expr, env any, depth int) (
 // evalCompositeLit evaluates the two composite-literal shapes expr
 // accepts: `[]any{...}` and `map[string]any{...}`. These are what the
 // jsonlit rewrite produces for bare `[...]` and `{...}` literals, and
-// they are also accepted directly in source so users can write them
-// without enabling WithJSONLiterals.
+// they are also accepted directly in source.
 //
 // Other type forms (fixed-size arrays, typed slices like `[]int{}`,
 // maps with non-string keys, struct literals, etc.) are rejected —

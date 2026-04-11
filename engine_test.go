@@ -202,7 +202,7 @@ type ptrEnv struct {
 func (e *ptrEnv) Triple() int { return e.Value * 3 }
 
 func TestEval_StructEnv(t *testing.T) {
-	e := New(WithBuiltins())
+	opts := []CompileOption{WithBuiltins()}
 	env := testEnv{Count: 5, Name: "Alice", Items: []int{1, 2, 3}}
 
 	cases := []struct {
@@ -218,7 +218,7 @@ func TestEval_StructEnv(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := e.Eval(t.Context(), tc.expr, env)
+			got, err := Eval(t.Context(), tc.expr, env, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -253,25 +253,24 @@ func TestEval_StructEnv_FieldBeatsFunction(t *testing.T) {
 	// A struct field named "Len" should shadow the len builtin at the
 	// root-lookup stage. The engine opts in to WithBuiltins so the
 	// shadowing is actually meaningful.
-	e := New(WithBuiltins())
+	opts := []CompileOption{WithBuiltins()}
 	type hasLen struct{ Len int }
 	env := hasLen{Len: 99}
 
-	got, err := e.Eval(t.Context(), "Len", env)
+	got, err := Eval(t.Context(), "Len", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 99, got)
 }
 
 func TestEval_EngineEval_StructEnv(t *testing.T) {
-	e := New()
 	env := testEnv{Count: 10}
-	got, err := e.Eval(t.Context(), "Count * 4", env)
+	got, err := Eval(t.Context(), "Count * 4", env)
 	require.NoError(t, err)
 	require.Equal(t, int64(40), got)
 }
 
 func TestEval_Builtins(t *testing.T) {
-	e := New(WithBuiltins())
+	opts := []CompileOption{WithBuiltins()}
 	env := map[string]any{
 		"state": map[string]any{
 			"name":  "Alice",
@@ -298,7 +297,7 @@ func TestEval_Builtins(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
-			got, err := e.Eval(t.Context(), tc.expr, env)
+			got, err := Eval(t.Context(), tc.expr, env, opts...)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -306,53 +305,52 @@ func TestEval_Builtins(t *testing.T) {
 }
 
 func TestEval_Keys(t *testing.T) {
-	e := New(WithBuiltins())
+	opts := []CompileOption{WithBuiltins()}
 	env := map[string]any{
 		"m": map[string]any{"b": 2, "a": 1, "c": 3},
 	}
-	got, err := e.Eval(t.Context(), "keys(m)", env)
+	got, err := Eval(t.Context(), "keys(m)", env, opts...)
 	require.NoError(t, err)
 	require.Equal(t, []any{"a", "b", "c"}, got)
 }
 
 func TestEngine_CustomFunctions(t *testing.T) {
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"double": func(n int) int { return n * 2 },
 		"greet":  func(name string) string { return "Hello, " + name },
-	}))
-	got, err := e.Eval(t.Context(), "double(state.count)", map[string]any{
+	})}
+	got, err := Eval(t.Context(), "double(state.count)", map[string]any{
 		"state": map[string]any{"count": int64(21)},
-	})
+	}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 42, got)
 
-	got, err = e.Eval(t.Context(), `greet("world")`, nil)
+	got, err = Eval(t.Context(), `greet("world")`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "Hello, world", got)
 }
 
 func TestEngine_CustomFunction_WithError(t *testing.T) {
 	boom := errors.New("boom")
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"fail": func() (int, error) { return 0, boom },
-	}))
-	_, err := e.Eval(t.Context(), "fail()", nil)
+	})}
+	_, err := Eval(t.Context(), "fail()", nil, opts...)
 	require.ErrorIs(t, err, boom)
 }
 
 func TestEngine_DefaultNoBuiltins(t *testing.T) {
-	// New() has no functions registered by default; calling a builtin
-	// without opting in should surface an "unknown function" error.
-	e := New()
-	_, err := e.Eval(t.Context(), "len(state.items)", map[string]any{"state": map[string]any{"items": []any{1}}})
+	// Compile/Eval with no options has no functions registered by default;
+	// calling a builtin without opting in should surface an "unknown function" error.
+	_, err := Eval(t.Context(), "len(state.items)", map[string]any{"state": map[string]any{"items": []any{1}}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown function")
 }
 
 func TestEngine_WithBuiltins(t *testing.T) {
 	// Opting in to WithBuiltins makes the standard set callable.
-	e := New(WithBuiltins())
-	got, err := e.Eval(t.Context(), "len(state.items)", map[string]any{"state": map[string]any{"items": []any{1, 2, 3}}})
+	opts := []CompileOption{WithBuiltins()}
+	got, err := Eval(t.Context(), "len(state.items)", map[string]any{"state": map[string]any{"items": []any{1, 2, 3}}}, opts...)
 	require.NoError(t, err)
 	require.Equal(t, 3, got)
 }
@@ -393,22 +391,18 @@ func TestEval_UnsupportedSyntax(t *testing.T) {
 	}
 }
 
-func TestEngine_CompilerAdapter(t *testing.T) {
-	c := New().Compiler()
-
-	script, err := c.Compile("state.x > 5")
+func TestEngine_ProgramRun(t *testing.T) {
+	p, err := Compile("state.x > 5")
 	require.NoError(t, err)
 
-	v, err := script.Run(t.Context(), map[string]any{"state": map[string]any{"x": int64(10)}})
+	v, err := p.Run(t.Context(), map[string]any{"state": map[string]any{"x": int64(10)}})
 	require.NoError(t, err)
 	require.Equal(t, true, v)
 	require.True(t, IsTruthyValue(v))
 }
 
 func TestEngine_Template(t *testing.T) {
-	engine := New().Compiler()
-
-	tmpl, err := NewTemplate(engine, "Hello ${state.name}, you are ${state.age} years old")
+	tmpl, err := NewTemplate("Hello ${state.name}, you are ${state.age} years old")
 	require.NoError(t, err)
 	got, err := tmpl.Eval(t.Context(), map[string]any{
 		"state": map[string]any{"name": "Alice", "age": int64(30)},
@@ -425,10 +419,10 @@ func TestEval_UndefinedIdentifier(t *testing.T) {
 
 func TestEval_StringMethods(t *testing.T) {
 	// String builtins via WithFunctions — demonstrates Go interop.
-	e := New(WithFunctions(map[string]any{
+	opts := []CompileOption{WithFunctions(map[string]any{
 		"trim": strings.TrimSpace,
-	}))
-	got, err := e.Eval(t.Context(), `trim("  hi  ")`, nil)
+	})}
+	got, err := Eval(t.Context(), `trim("  hi  ")`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, "hi", got)
 }
@@ -502,18 +496,7 @@ func TestEval_CompositeLit_Unsupported(t *testing.T) {
 	}
 }
 
-func TestEval_JSONLiterals_Disabled(t *testing.T) {
-	// Bare bracket/brace literals are a compile error without the option.
-	_, err := Compile(`[1, 2, 3]`)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCompile)
-
-	_, err = Compile(`{"k": 1}`)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCompile)
-}
-
-func TestEval_JSONLiterals_Enabled(t *testing.T) {
+func TestEval_JSONLiterals(t *testing.T) {
 	cases := []struct {
 		src  string
 		want any
@@ -533,30 +516,17 @@ func TestEval_JSONLiterals_Enabled(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.src, func(t *testing.T) {
-			got, err := Eval(t.Context(), tc.src, nil, WithJSONLiterals())
+			got, err := Eval(t.Context(), tc.src, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
 	}
 }
 
-func TestEval_JSONLiterals_CompileOptionPerCall(t *testing.T) {
-	// Option applies only to the call it is passed to; Programs compiled
-	// without the option continue to reject bare literals.
-	_, err := Compile(`[1, 2, 3]`)
-	require.Error(t, err)
-
-	p, err := Compile(`[1, 2, 3]`, WithJSONLiterals())
-	require.NoError(t, err)
-	got, err := p.Run(t.Context(), nil)
-	require.NoError(t, err)
-	require.Equal(t, []any{int64(1), int64(2), int64(3)}, got)
-}
-
 func TestEval_JSONLiterals_MapInterop(t *testing.T) {
 	// map higher-order form still works on bare-literal slices.
-	e := New(WithBuiltins())
-	got, err := e.Eval(t.Context(), `map([1, 2, 3], it * 10)`, nil, WithJSONLiterals())
+	opts := []CompileOption{WithBuiltins()}
+	got, err := Eval(t.Context(), `map([1, 2, 3], it * 10)`, nil, opts...)
 	require.NoError(t, err)
 	require.Equal(t, []any{int64(10), int64(20), int64(30)}, got)
 }

@@ -18,10 +18,10 @@ parameter interpolation.
 
 | File              | Purpose                                                          |
 | ----------------- | ---------------------------------------------------------------- |
-| `engine.go`       | `Engine`, options, `Compile`/`Eval`, `map` keyword preprocessing |
+| `engine.go`       | `Compile`/`Eval`, `CompileOption`, `map` keyword preprocessing |
 | `program.go`      | AST walker — the evaluator                                       |
 | `reflect.go`      | Env lookup, function dispatch, type coercion                     |
-| `builtins.go`     | Default function set registered by `New()`                       |
+| `builtins.go`     | Default function set exposed by `Builtins()` / `WithBuiltins()`  |
 | `higher_order.go` | `map`, `filter`, etc.                                            |
 | `suggest.go`      | "Did you mean…" for unknown identifiers                          |
 | `docs/SPEC.md`    | Language specification                                           |

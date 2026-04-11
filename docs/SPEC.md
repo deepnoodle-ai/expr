@@ -146,8 +146,8 @@ A bare identifier `foo` is resolved in this order:
    - If `env` is a struct or a pointer to a struct, take the exported
      field named `foo`; if no field matches, take the bound method
      named `foo`. **Fields beat methods.**
-3. The engine's registered functions (whatever was passed to
-   `WithBuiltins`, `WithFunctions`, or any combination thereof).
+3. The functions registered via the CompileOptions passed to `Compile`
+   or `Eval` (`WithBuiltins`, `WithFunctions`, or any combination).
 4. Otherwise: `ErrEvaluate: undefined identifier`.
 
 Unexported struct fields are **not** reachable by name. Attempting to
@@ -249,19 +249,21 @@ an `ErrEvaluate` chain via `errors.Is`.
 
 ## Builtins
 
-A fresh `expr.New()` has no functions registered. Opt in to the standard
-set below with `expr.WithBuiltins()`, register your own with
-`expr.WithFunctions(...)`, or pass both:
+By default no functions are registered. Opt in to the standard set
+below by passing `expr.WithBuiltins()` as a CompileOption, register your
+own with `expr.WithFunctions(...)`, or combine both:
 
 ```go
-e := expr.New(
+v, err := expr.Eval(ctx, `upper(user.name)`, env,
     expr.WithBuiltins(),
     expr.WithFunctions(map[string]any{"upper": strings.ToUpper}),
 )
 ```
 
 Options apply in order, so a later `WithFunctions` wins over an earlier
-`WithBuiltins` for any shared name.
+`WithBuiltins` for any shared name. The same options passed to `Compile`
+are baked into the returned `*Program`, so `Run` needs no further
+configuration.
 
 The standard set is:
 
@@ -365,7 +367,7 @@ through the AST, and `MaxEvalDepth` caps the tree. Therefore a program
 with no registered functions and no env-method calls has a hard
 termination bound proportional to the AST size.
 
-`Program.Run(ctx, env)` and `Engine.Eval(ctx, code, env)`
+`Program.Run(ctx, env)` and `expr.Eval(ctx, code, env, opts...)`
 add cooperative cancellation on top of that bound:
 
 - Every AST node visit checks `ctx.Err()` before dispatching. A
@@ -384,7 +386,7 @@ Injection only fires when `context.Context` is the first parameter;
 later positions are treated as ordinary arguments.
 
 ```go
-e := expr.New(expr.WithFunctions(map[string]any{
+p, _ := expr.Compile(`fetch("https://...")`, expr.WithFunctions(map[string]any{
     "fetch": func(ctx context.Context, url string) (string, error) { ... },
 }))
 // expression calls it as fetch("https://..."), the ctx from Run
@@ -446,32 +448,25 @@ struct literals, etc.) returns `ErrEvaluate`. expr is untyped at the value
 level, so widening the accepted set would not change what the evaluator
 can represent.
 
-### JSON-style literals (opt-in)
+### JSON-style literals
 
-By default, bare bracket/brace literals like `[1, 2, 3]` or `{"name": "ada"}`
-fail to compile — Go's parser does not accept them. Callers can opt in per
-call by passing `WithJSONLiterals` to `Compile` or `Eval`:
-
-```go
-v, err := e.Eval(ctx, `{"items": [1, 2, 3], "ok": true}`, env,
-    expr.WithJSONLiterals())
-```
-
-With the option set, expr runs a source rewrite (implemented by the
-`jsonlit` subpackage) before parsing:
+expr accepts bare bracket/brace literals like `[1, 2, 3]` or
+`{"name": "ada"}` directly. Before parsing, every source string is run
+through a token-based rewrite (implemented in `internal/jsonlit`):
 
 - `[a, b, c]` → `[]any{a, b, c}`
 - `{"k": v}` → `map[string]any{"k": v}`
 - `[]` → `[]any{}`
 - `{}` → `map[string]any{}`
 
-The rewrite is token-based and leaves strings, runes, comments, and
-already-typed Go composite literals (`[]any{1, 2}`, `map[string]any{...}`,
-`[]int{}`, slice/index expressions like `xs[0]`, array types like `[3]int`)
-untouched. When the option is not set, none of this rewriting happens and
-bare JSON-style literals are a compile error. The same compiled `Program`
-can be run concurrently regardless of whether the option was used — the
-option only affects source parsing, not evaluation.
+```go
+v, err := e.Eval(ctx, `{"items": [1, 2, 3], "ok": true}`, env)
+```
+
+The rewrite leaves strings, runes, comments, and already-typed Go
+composite literals (`[]any{1, 2}`, `map[string]any{...}`, `[]int{}`,
+slice/index expressions like `xs[0]`, array types like `[3]int`)
+untouched, so expressions that never use bare literals are unaffected.
 
 ## Error model
 

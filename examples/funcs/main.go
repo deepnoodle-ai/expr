@@ -11,17 +11,15 @@ import (
 func main() {
 	ctx := context.Background()
 
-	e := expr.New(expr.WithFunctions(map[string]any{
+	env := map[string]any{"name": "ada"}
+
+	v, err := expr.Eval(ctx, `greet(upper(name))`, env, expr.WithFunctions(map[string]any{
 		"upper":     strings.ToUpper,
 		"hasPrefix": strings.HasPrefix,
 		"greet": func(name string) string {
 			return "Hello, " + name + "!"
 		},
 	}))
-
-	env := map[string]any{"name": "ada"}
-
-	v, err := e.Eval(ctx, `greet(upper(name))`, env)
 	if err != nil {
 		panic(err)
 	}
