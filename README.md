@@ -157,7 +157,7 @@ suite, `deepnoodle/expr` is competitive with `expr-lang/expr` and faster
 than `cel-go` on nearly every case (the one exception is plain array
 indexing, where `cel-go` wins by a few nanoseconds):
 
-![Eval benchmark](docs/bench_run.svg)
+![Eval benchmark](docs/assets/bench_run.svg)
 
 The same numbers the chart is built from (Apple M1, ns per eval of a
 pre-compiled expression, lower is better):
@@ -182,13 +182,19 @@ regenerate the charts with:
 
 ```sh
 cd internal/benchcmp
-go test -run=^$ -bench=. -benchtime=300ms ./... | go run ./chart ../../docs
+go test -run=^$ -bench=. -benchtime=300ms ./... | go run ./chart ../../docs/assets
 ```
 
 ## More
 
-- [`docs/SPEC.md`](docs/SPEC.md) is the authoritative language reference.
+- [`docs/reference/spec.md`](docs/reference/spec.md) is the authoritative language reference.
+- [`docs/guides/`](docs/guides/) has deeper guides on registering Go
+  functions, designing an env, sandboxing untrusted expressions, using
+  templates in anger, and higher-order patterns. Start with
+  [`examples.md`](docs/guides/examples.md) for worked multi-line expressions.
 - [`examples/`](examples/) has runnable versions of everything above.
+- [`llms.txt`](llms.txt) is a condensed reference sized for LLM context
+  windows, if you're pointing an assistant at this library.
 
 ## License
 
