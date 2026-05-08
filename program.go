@@ -489,6 +489,9 @@ func (p *Program) evalUnary(ctx context.Context, n *ast.UnaryExpr, env any, dept
 func (p *Program) evalBinary(ctx context.Context, n *ast.BinaryExpr, env any, depth int) (any, error) {
 	// Short-circuit logical operators: right-hand side is not evaluated
 	// when the left-hand side is sufficient to determine the result.
+	// Both operators return the deciding operand (matching Python
+	// `and`/`or`, JS `||`/`&&`), not a coerced bool. This composes with
+	// truthiness for idioms like `name || "(none)"` and `xs || []`.
 	if n.Op == token.LAND || n.Op == token.LOR {
 		lhs, err := p.eval(ctx, n.X, env, depth)
 		if err != nil {
@@ -496,16 +499,12 @@ func (p *Program) evalBinary(ctx context.Context, n *ast.BinaryExpr, env any, de
 		}
 		lt := isTruthy(lhs)
 		if n.Op == token.LAND && !lt {
-			return false, nil
+			return lhs, nil
 		}
 		if n.Op == token.LOR && lt {
-			return true, nil
+			return lhs, nil
 		}
-		rhs, err := p.eval(ctx, n.Y, env, depth)
-		if err != nil {
-			return nil, err
-		}
-		return isTruthy(rhs), nil
+		return p.eval(ctx, n.Y, env, depth)
 	}
 
 	lhs, err := p.eval(ctx, n.X, env, depth)

@@ -1332,7 +1332,9 @@ func TestEdgeCase_TruthinessHonorsTypedNilAndNamedScalars(t *testing.T) {
 		{"bool(nonzeroInt)", true},
 		{"zeroInt + 2", int64(2)},
 		{`bool(emptyStr)`, false},
-		{`bool(falseStr)`, false},
+		// bool() does not inspect string content; "false" is a non-empty
+		// string and is therefore truthy.
+		{`bool(falseStr)`, true},
 		{`int(numStr) + 1`, int64(42)},
 		{`upper(falseStr)`, "FALSE"},
 		{`contains(falseStr, needle)`, true},
