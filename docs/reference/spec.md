@@ -422,6 +422,13 @@ lists the available names. When neither condition is useful, the
 original error is returned unchanged so callers can still pattern-
 match on it.
 
+A higher-order form referenced as a value gets a tailored hint with
+the call signature, so users see what shape the form expects rather
+than a self-referential "did you mean":
+
+- `undefined identifier "count" ("count" is a special form, did you mean to call count(xs, predicate)?)`
+- `undefined identifier "try" ("try" is a special form, did you mean to call try(value, default)?)`
+
 ## Limits and safety
 
 expr is meant to evaluate untrusted expression text without panicking.
