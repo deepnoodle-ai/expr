@@ -183,6 +183,9 @@ func applyUnary(op token.Token, v any) (any, error) {
 		return !isTruthy(v), nil
 	case token.SUB:
 		if i, ok := toInt64(v); ok {
+			if i == math.MinInt64 {
+				return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
+			}
 			return -i, nil
 		}
 		if f, ok := toFloat64(v); ok {
@@ -431,11 +434,11 @@ func lookupEnv(env any, name string) (any, bool) {
 			return fv.Interface(), true
 		}
 		if mv := orig.MethodByName(name); mv.IsValid() {
-			return mv.Interface(), true
+			return methodCallable(name, mv), true
 		}
 	case reflect.Map:
 		if rv.Type().Key().Kind() == reflect.String {
-			mv := rv.MapIndex(reflect.ValueOf(name))
+			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 			if mv.IsValid() {
 				return mv.Interface(), true
 			}
@@ -454,6 +457,9 @@ func (p *Program) evalUnary(ctx context.Context, n *ast.UnaryExpr, env any, dept
 		return !isTruthy(v), nil
 	case token.SUB:
 		if i, ok := toInt64(v); ok {
+			if i == math.MinInt64 {
+				return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
+			}
 			return -i, nil
 		}
 		if f, ok := toFloat64(v); ok {
@@ -507,24 +513,9 @@ func (p *Program) evalBinary(ctx context.Context, n *ast.BinaryExpr, env any, de
 
 func applyBinary(op token.Token, lhs, rhs any) (any, error) {
 	// String concatenation and comparison.
-	if ls, lok := lhs.(string); lok {
-		if rs, rok := rhs.(string); rok {
-			switch op {
-			case token.ADD:
-				return ls + rs, nil
-			case token.EQL:
-				return ls == rs, nil
-			case token.NEQ:
-				return ls != rs, nil
-			case token.LSS:
-				return ls < rs, nil
-			case token.GTR:
-				return ls > rs, nil
-			case token.LEQ:
-				return ls <= rs, nil
-			case token.GEQ:
-				return ls >= rs, nil
-			}
+	if ls, lok := asString(lhs); lok {
+		if rs, rok := asString(rhs); rok {
+			return applyStringBinary(op, ls, rs)
 		}
 	}
 
@@ -545,14 +536,26 @@ func applyBinary(op token.Token, lhs, rhs any) (any, error) {
 	if liOk && riOk {
 		switch op {
 		case token.ADD:
-			return li + ri, nil
+			if v, ok := checkedAddInt64(li, ri); ok {
+				return v, nil
+			}
+			return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
 		case token.SUB:
-			return li - ri, nil
+			if v, ok := checkedSubInt64(li, ri); ok {
+				return v, nil
+			}
+			return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
 		case token.MUL:
-			return li * ri, nil
+			if v, ok := checkedMulInt64(li, ri); ok {
+				return v, nil
+			}
+			return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
 		case token.QUO:
 			if ri == 0 {
 				return nil, fmt.Errorf("%w: division by zero", ErrEvaluate)
+			}
+			if li == math.MinInt64 && ri == -1 {
+				return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
 			}
 			return li / ri, nil
 		case token.REM:
@@ -605,6 +608,54 @@ func applyBinary(op token.Token, lhs, rhs any) (any, error) {
 	return nil, fmt.Errorf("%w: operator %v not supported for %T and %T", ErrEvaluate, op, lhs, rhs)
 }
 
+func applyStringBinary(op token.Token, lhs, rhs string) (any, error) {
+	switch op {
+	case token.ADD:
+		return lhs + rhs, nil
+	case token.EQL:
+		return lhs == rhs, nil
+	case token.NEQ:
+		return lhs != rhs, nil
+	case token.LSS:
+		return lhs < rhs, nil
+	case token.GTR:
+		return lhs > rhs, nil
+	case token.LEQ:
+		return lhs <= rhs, nil
+	case token.GEQ:
+		return lhs >= rhs, nil
+	}
+	return nil, fmt.Errorf("%w: operator %v not supported for string and string", ErrEvaluate, op)
+}
+
+func checkedAddInt64(a, b int64) (int64, bool) {
+	if (b > 0 && a > math.MaxInt64-b) || (b < 0 && a < math.MinInt64-b) {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedSubInt64(a, b int64) (int64, bool) {
+	if (b < 0 && a > math.MaxInt64+b) || (b > 0 && a < math.MinInt64+b) {
+		return 0, false
+	}
+	return a - b, true
+}
+
+func checkedMulInt64(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if (a == math.MinInt64 && b == -1) || (b == math.MinInt64 && a == -1) {
+		return 0, false
+	}
+	v := a * b
+	if v/b != a {
+		return 0, false
+	}
+	return v, true
+}
+
 func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any, depth int) (any, error) {
 	// Fast path: an ident-rooted selector chain (a.b.c.d) can be walked
 	// entirely through reflect.Value, materializing only the leaf via
@@ -613,7 +664,7 @@ func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any
 	// embedded array gets memcpy'd on each access. The fast path skips
 	// plain map[string]any roots because the type-asserted map lookup
 	// in selectField is already faster than reflect MapIndex.
-	if v, ok, err := evalSelectorChainRV(n, env); ok {
+	if v, ok, err := evalSelectorChainRV(n, env, depth); ok {
 		return v, err
 	}
 	recv, err := p.eval(ctx, n.X, env, depth)
@@ -629,7 +680,7 @@ func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any
 // declines for non-ident roots, for plain map[string]any envs (the
 // general path is faster there), and for itEnv lookups of `it`/`index`
 // whose values do not benefit.
-func evalSelectorChainRV(n *ast.SelectorExpr, env any) (any, bool, error) {
+func evalSelectorChainRV(n *ast.SelectorExpr, env any, depth int) (any, bool, error) {
 	if _, isMap := env.(map[string]any); isMap {
 		return nil, false, nil
 	}
@@ -647,6 +698,9 @@ func evalSelectorChainRV(n *ast.SelectorExpr, env any) (any, bool, error) {
 	ident, ok := cur.(*ast.Ident)
 	if !ok {
 		return nil, false, nil
+	}
+	if depth+len(names) > MaxEvalDepth {
+		return nil, true, fmt.Errorf("%w: expression nested too deeply (limit %d)", ErrEvaluate, MaxEvalDepth)
 	}
 	switch ident.Name {
 	case "true", "false", "nil":
@@ -711,11 +765,11 @@ func lookupEnvRV(env any, name string) (reflect.Value, bool) {
 			return fv, true
 		}
 		if mv := orig.MethodByName(name); mv.IsValid() {
-			return mv, true
+			return reflect.ValueOf(methodCallable(name, mv)), true
 		}
 	case reflect.Map:
 		if rv.Type().Key().Kind() == reflect.String {
-			mv := rv.MapIndex(reflect.ValueOf(name))
+			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 			if mv.IsValid() {
 				return mv, true
 			}
@@ -754,7 +808,7 @@ func selectFieldRV(rv reflect.Value, name string) (reflect.Value, error) {
 		if rv.Type().Key().Kind() != reflect.String {
 			return reflect.Value{}, fmt.Errorf("%w: cannot select %q on map with non-string keys", ErrEvaluate, name)
 		}
-		mv := rv.MapIndex(reflect.ValueOf(name))
+		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 		if !mv.IsValid() {
 			return reflect.Value{}, fmt.Errorf("%w: key %q not found%s",
 				ErrEvaluate, name, fieldHint(rv.Interface(), name))
@@ -786,7 +840,7 @@ func selectField(recv any, name string) (any, error) {
 		if rv.Type().Key().Kind() != reflect.String {
 			return nil, fmt.Errorf("%w: cannot select %q on map with non-string keys", ErrEvaluate, name)
 		}
-		mv := rv.MapIndex(reflect.ValueOf(name))
+		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 		if !mv.IsValid() {
 			return nil, fmt.Errorf("%w: key %q not found%s",
 				ErrEvaluate, name, fieldHint(recv, name))
@@ -946,10 +1000,17 @@ func indexValue(recv, idx any) (any, error) {
 		}
 		kv := reflect.ValueOf(idx)
 		if !kv.Type().AssignableTo(keyType) {
-			if !kv.Type().ConvertibleTo(keyType) {
+			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
+				converted, err := safeNumericConvert(kv, keyType)
+				if err != nil {
+					return nil, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
+				}
+				kv = converted
+			} else if kv.Type().ConvertibleTo(keyType) {
+				kv = kv.Convert(keyType)
+			} else {
 				return nil, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
 			}
-			kv = kv.Convert(keyType)
 		}
 		mv := rv.MapIndex(kv)
 		if !mv.IsValid() {
@@ -1096,12 +1157,12 @@ func resolveMethod(recv any, name string) (any, error) {
 		return nil, fmt.Errorf("%w: cannot call %q on nil pointer", ErrEvaluate, name)
 	}
 	if mv := rv.MethodByName(name); mv.IsValid() {
-		return mv.Interface(), nil
+		return methodCallable(name, mv), nil
 	}
 	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 		if mv := rv.MethodByName(name); mv.IsValid() {
-			return mv.Interface(), nil
+			return methodCallable(name, mv), nil
 		}
 	}
 	switch rv.Kind() {
@@ -1111,7 +1172,7 @@ func resolveMethod(recv any, name string) (any, error) {
 		}
 	case reflect.Map:
 		if rv.Type().Key().Kind() == reflect.String {
-			mv := rv.MapIndex(reflect.ValueOf(name))
+			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 			if mv.IsValid() {
 				return mv.Interface(), nil
 			}
@@ -1119,4 +1180,10 @@ func resolveMethod(recv any, name string) (any, error) {
 	}
 	return nil, fmt.Errorf("%w: method %q not found on %T%s",
 		ErrEvaluate, name, recv, fieldHint(recv, name))
+}
+
+func methodCallable(name string, mv reflect.Value) Func {
+	return func(ctx context.Context, args []any) (any, error) {
+		return callMethodValue(ctx, name, mv, args)
+	}
 }

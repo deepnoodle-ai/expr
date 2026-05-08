@@ -100,6 +100,8 @@ When you register `func(int)` or `func(float32)`, expr converts at the
 call site — but only if the value fits. A range check happens on every
 integer narrowing, so a `2_000_000_000` passed to a `func(int16)`
 errors at runtime instead of silently wrapping.
+Integer-to-string conversion is deliberately rejected: `fn(65)` will not
+be treated as `fn("A")`.
 
 ```go
 expr.WithFunctions(map[string]any{

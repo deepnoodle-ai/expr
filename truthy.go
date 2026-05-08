@@ -51,8 +51,21 @@ func IsTruthy(value any) bool {
 	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
+	case reflect.Bool:
+		return rv.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int() != 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return rv.Uint() != 0
+	case reflect.Float32, reflect.Float64:
+		return rv.Float() != 0
+	case reflect.String:
+		s := rv.String()
+		return s != "" && !strings.EqualFold(s, "false")
 	case reflect.Slice, reflect.Array, reflect.Map:
 		return rv.Len() > 0
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer:
+		return !rv.IsNil()
 	}
 	return value != nil
 }

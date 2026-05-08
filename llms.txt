@@ -95,8 +95,8 @@ registered yourself. This keeps the sandbox surface as narrow as you want.
 | Name              | Signature                      | Notes                                                     |
 | ----------------- | ------------------------------ | --------------------------------------------------------- |
 | `len(v)`          | `(any) -> int`                 | Runes for strings; elements for slice/array/map/chan      |
-| `string(v)`       | `(any) -> string`              | Passthrough; `fmt.Sprintf("%v", v)` otherwise             |
-| `int(v)`          | `(any) -> int64`               | Truncates floats; strict base-10 parse for strings        |
+| `string(v)`       | `(any) -> string`              | Passthrough; cycle-safe `%v`-style formatting otherwise   |
+| `int(v)`          | `(any) -> int64`               | Truncates floats; rejects NaN/Inf/out-of-range; strict base-10 strings |
 | `float(v)`        | `(any) -> float64`             | `strconv.ParseFloat` 64-bit for strings                   |
 | `bool(v)`         | `(any) -> bool`                | Same rules as truthiness                                  |
 | `contains(h, n)`  | `(any, any) -> bool`           | Substring, element, or map-key presence                   |
@@ -104,7 +104,7 @@ registered yourself. This keeps the sandbox surface as narrow as you want.
 | `keys(m)`         | `(any) -> []any`               | Sorted string keys                                         |
 | `upper(s)`        | `(string) -> string`           | `strings.ToUpper`                                          |
 | `lower(s)`        | `(string) -> string`           | `strings.ToLower`                                          |
-| `sprintf(f, ...)` | `(string, ...any) -> string`   | `fmt.Sprintf`                                              |
+| `sprintf(f, ...)` | `(string, ...any) -> string`   | `fmt.Sprintf`-style; cycle-safe for recursive values      |
 
 ## Higher-order forms (always registered)
 
@@ -158,7 +158,8 @@ expr.WithFunctions(map[string]any{
 
 - `map[string]any` — identifiers are map keys. Missing keys are
   **errors**, not zero values.
-- Any other `map[string]T` with string keys — resolved via reflection.
+- Any other map with string-like keys (`reflect.String`, including
+  named string key types) — resolved via reflection.
 - Struct — exported field, falling back to zero-arg bound method of
   the same name. Fields beat methods. Unexported fields are unreachable.
 - Pointer to struct — dereferenced and retried. Nil pointer is an error.
@@ -212,9 +213,9 @@ See `docs/guides/examples.md` for worked multi-line expressions.
 - **Equality (`==`, `!=`)** is loose: mixed int/float kinds compare as
   `float64`; typed nil values compare equal to literal `nil`; mismatched
   types are `false` without error; uncomparable types error.
-- **Arithmetic:** int+int → int64 (wraps on overflow); any float mix →
-  float64; `+` on strings is concatenation. Division/modulo by zero
-  errors, not panics.
+- **Arithmetic:** int+int → int64; integer overflow and division/modulo
+  by zero error instead of silently wrapping or panicking. Any float mix
+  → float64; `+` on strings is concatenation.
 - **Truthiness:** nil, false, zero numbers, empty string, empty
   slice/array/map, and typed-nil nilable kinds are falsey. Everything
   else is truthy.

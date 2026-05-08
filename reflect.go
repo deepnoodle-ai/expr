@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 )
 
 // ctxType is the reflect.Type of context.Context; cached at package init so
@@ -17,6 +18,9 @@ var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
 // first parameter is context.Context, ctx is passed through automatically
 // and is not counted against the caller-supplied argument list.
 func callFunction(ctx context.Context, name string, fn any, args []any) (any, error) {
+	if nf, ok := fn.(Func); ok {
+		return nf(ctx, args)
+	}
 	fv := reflect.ValueOf(fn)
 	if fv.Kind() != reflect.Func {
 		return nil, fmt.Errorf("%w: %q is not a function (got %T)", ErrEvaluate, name, fn)
@@ -31,7 +35,48 @@ func callFunction(ctx context.Context, name string, fn any, args []any) (any, er
 		return nil, err
 	}
 
-	out := fv.Call(in)
+	return finishCall(name, ft, callReflect(fv, in))
+}
+
+func callReflect(fv reflect.Value, in []reflect.Value) []reflect.Value {
+	return fv.Call(in)
+}
+
+func callReflectRecoverRuntime(name string, fv reflect.Value, in []reflect.Value) (out []reflect.Value, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(runtime.Error); ok {
+				out = nil
+				err = fmt.Errorf("%w: %q panicked during method dispatch: %v", ErrEvaluate, name, r)
+				return
+			}
+			panic(r)
+		}
+	}()
+	out = fv.Call(in)
+	return out, nil
+}
+
+func callMethodValue(ctx context.Context, name string, fv reflect.Value, args []any) (any, error) {
+	if fv.Kind() != reflect.Func {
+		return nil, fmt.Errorf("%w: %q is not a function (got %v)", ErrEvaluate, name, fv.Kind())
+	}
+	if fv.IsNil() {
+		return nil, fmt.Errorf("%w: %q is a nil function value", ErrEvaluate, name)
+	}
+	ft := fv.Type()
+	in, err := buildCallArgs(ctx, name, ft, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := callReflectRecoverRuntime(name, fv, in)
+	if err != nil {
+		return nil, err
+	}
+	return finishCall(name, ft, out)
+}
+
+func finishCall(name string, ft reflect.Type, out []reflect.Value) (any, error) {
 	switch ft.NumOut() {
 	case 0:
 		return nil, nil
@@ -126,6 +171,9 @@ func convertArg(name string, idx int, value any, want reflect.Type) (reflect.Val
 		}
 		return converted, nil
 	}
+	if isIntegerKind(rv.Kind()) && want.Kind() == reflect.String {
+		return reflect.Value{}, fmt.Errorf("%w: %q arg %d: cannot convert integer to string", ErrEvaluate, name, idx)
+	}
 	if want.Kind() == reflect.Interface && rv.Type().Implements(want) {
 		return rv, nil
 	}
@@ -140,6 +188,15 @@ func isNumericKind(k reflect.Kind) bool {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
 		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
+}
+
+func isIntegerKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return true
 	}
 	return false
@@ -164,15 +221,11 @@ func safeNumericConvert(rv reflect.Value, want reflect.Type) (reflect.Value, err
 	switch rv.Kind() {
 	case reflect.Float32, reflect.Float64:
 		f := rv.Float()
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return reflect.Value{}, fmt.Errorf("cannot convert %v to %v", f, want)
+		i, err := truncFloatToInt64(f, want.String())
+		if err != nil {
+			return reflect.Value{}, err
 		}
-		// Truncate toward zero, then bounds-check as if we had an int64.
-		t := math.Trunc(f)
-		if t > math.MaxInt64 || t < math.MinInt64 {
-			return reflect.Value{}, fmt.Errorf("float %v out of range for %v", f, want)
-		}
-		return intToKind(int64(t), want)
+		return intToKind(i, want)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		u := rv.Uint()
 		if u > math.MaxInt64 && isSignedInt(k) {
@@ -285,6 +338,27 @@ func uintToKind(v uint64, want reflect.Type) (reflect.Value, error) {
 
 // --- numeric / equality / truthiness helpers ---
 
+const int64LimitFloat = float64(uint64(1) << 63)
+
+func truncFloatToInt64(f float64, target string) (int64, error) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("cannot convert %v to %s", f, target)
+	}
+	t := math.Trunc(f)
+	if t >= int64LimitFloat || t < -int64LimitFloat {
+		return 0, fmt.Errorf("float %v out of range for %s", f, target)
+	}
+	return int64(t), nil
+}
+
+func mapStringKey(keyType reflect.Type, key string) reflect.Value {
+	kv := reflect.ValueOf(key)
+	if kv.Type().AssignableTo(keyType) {
+		return kv
+	}
+	return kv.Convert(keyType)
+}
+
 func toInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int:
@@ -298,6 +372,9 @@ func toInt64(v any) (int64, bool) {
 	case int64:
 		return n, true
 	case uint:
+		if uint64(n) > uint64(math.MaxInt64) {
+			return 0, false
+		}
 		return int64(n), true
 	case uint8:
 		return int64(n), true
@@ -306,7 +383,26 @@ func toInt64(v any) (int64, bool) {
 	case uint32:
 		return int64(n), true
 	case uint64:
+		if n > uint64(math.MaxInt64) {
+			return 0, false
+		}
 		return int64(n), true
+	case uintptr:
+		if uint64(n) > uint64(math.MaxInt64) {
+			return 0, false
+		}
+		return int64(n), true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int(), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		u := rv.Uint()
+		if u > uint64(math.MaxInt64) {
+			return 0, false
+		}
+		return int64(u), true
 	}
 	return 0, false
 }
@@ -317,6 +413,25 @@ func toFloat64(v any) (float64, bool) {
 		return float64(n), true
 	case float64:
 		return n, true
+	case uint:
+		return float64(n), true
+	case uint8:
+		return float64(n), true
+	case uint16:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case uintptr:
+		return float64(n), true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Float32, reflect.Float64:
+		return rv.Float(), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return float64(rv.Uint()), true
 	}
 	if i, ok := toInt64(v); ok {
 		return float64(i), true
@@ -344,6 +459,16 @@ func looseEqual(lhs, rhs any) (bool, bool) {
 			return lf == rf, true
 		}
 	}
+	if ls, lok := asString(lhs); lok {
+		if rs, rok := asString(rhs); rok {
+			return ls == rs, true
+		}
+	}
+	if lb, lok := asBool(lhs); lok {
+		if rb, rok := asBool(rhs); rok {
+			return lb == rb, true
+		}
+	}
 	lt := reflect.TypeOf(lhs)
 	if !lt.Comparable() {
 		return false, false
@@ -356,6 +481,20 @@ func looseEqual(lhs, rhs any) (bool, bool) {
 		return false, true
 	}
 	return lhs == rhs, true
+}
+
+func asBool(v any) (bool, bool) {
+	if b, ok := v.(bool); ok {
+		return b, true
+	}
+	if v == nil {
+		return false, false
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Bool {
+		return rv.Bool(), true
+	}
+	return false, false
 }
 
 // isNilValue reports whether v is nil at the Go level, including typed

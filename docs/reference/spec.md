@@ -76,13 +76,14 @@ group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
   concatenation. Integer `/` and `%` by zero return `ErrEvaluate`.
 - Any mix of int and float promotes both to `float64`. `%` on floats
   uses `math.Mod`. Float `/` and `%` by zero return `ErrEvaluate`.
-- Integer overflow wraps (matching Go). `-MinInt64` and `MinInt64 / -1`
-  wrap silently to `MinInt64`; they do not panic.
+- Integer overflow in `+`, `-`, `*`, unary `-`, and `MinInt64 / -1`
+  returns `ErrEvaluate`; it never silently wraps.
 - `+` on any other type combination is an error.
 
 ### Comparison (`== != < <= >= >`)
 
-- String vs string uses `strings` comparison.
+- String-like values (including named string types) use string
+  concatenation/comparison.
 - Numeric comparisons work across any combination of integer kinds and
   floats (see [Equality](#equality)).
 - Other comparable Go types use native equality when both sides are the
@@ -114,7 +115,10 @@ group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
 3. If both sides are any combination of integer or float kinds, they
    convert to `float64` and compare. `int32(7) == int64(7) == float64(7)`
    is `true`.
-4. Otherwise: if both runtime types are comparable, Go's `==` is used.
+4. If both sides are string-like or both are bool-like, they compare by
+   their underlying value, so named string/bool types compare naturally
+   with literals.
+5. Otherwise: if both runtime types are comparable, Go's `==` is used.
    Different types compare as `false` (no error). Uncomparable types
    return `ErrEvaluate`.
 
@@ -142,7 +146,9 @@ A bare identifier `foo` is resolved in this order:
 2. The `env` argument:
    - If `env` is `nil`, skip.
    - If `env` is `map[string]any`, look up `env["foo"]`.
-   - If `env` is any other map with string keys, look up via reflection.
+   - If `env` is any other map with string-like keys (key kind
+     `reflect.String`, including named string types), look up via
+     reflection.
    - If `env` is a struct or a pointer to a struct, take the exported
      field named `foo`; if no field matches, take the bound method
      named `foo`. **Fields beat methods.**
@@ -159,8 +165,8 @@ do not panic.
 `x.y` evaluates `x`, then looks up `y` on the result:
 
 - Nil receiver → `ErrEvaluate`.
-- `map[string]any` or any map with string keys → `y` is a key. Missing
-  keys return an error (not a zero value).
+- `map[string]any` or any map with string-like keys → `y` is a key.
+  Missing keys return an error (not a zero value).
 - Map with non-string keys → `ErrEvaluate`.
 - Struct → the exported field `y`, or `ErrEvaluate` if missing.
 - Pointer to struct → dereferenced and re-tried. Nil pointer →
@@ -174,7 +180,8 @@ limited by [evaluation depth](#limits-and-safety).
 
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
 - Other maps: `i` is converted to the map's key type if assignable or
-  convertible. A nil index on a typed map is an error (not a panic).
+  convertible. Numeric conversions are range-checked so narrowing cannot
+  silently wrap. A nil index on a typed map is an error (not a panic).
 - Slice, array: `i` must be an integer. Negative indices and indices
   `>= len(x)` return `ErrEvaluate` (expr does not support Python-style
   negative indexing).
@@ -227,10 +234,13 @@ before any reflect call that would panic.
   example, `int64(10)` → `int8` succeeds; `int64(300)` → `int8` is an
   error (not a silent wraparound). Negative → unsigned fails.
   `float64`↔`float32` is allowed and may lose precision.
+- Integer-to-string conversion is rejected. Go's reflect layer can
+  convert `65` to `"A"`, but expr treats that as a type error rather
+  than guessing that a rune conversion was intended.
 - Nil may be passed for any nilable-kind parameter (interface, pointer,
   map, slice, chan, func). Passing nil to a non-nilable parameter is an
   error.
-- Any other conversion uses `reflect.Value.ConvertibleTo` + `Convert`.
+- Other conversions use `reflect.Value.ConvertibleTo` + `Convert`.
   A nil function value (`var fn func(); fn == nil`) is detected and
   reported; it is never invoked.
 
@@ -271,16 +281,16 @@ The standard set is:
 | Name            | Signature                       | Notes |
 | --------------- | ------------------------------- | ----- |
 | `len(v)`        | `(any) -> int, error`           | Rune count for strings, element count for slice/array/map/chan, `0` for nil, error otherwise. |
-| `string(v)`     | `(any) -> string`               | Passthrough for strings, `fmt.Sprintf("%v", v)` otherwise, `""` for nil. |
-| `int(v)`        | `(any) -> int64, error`         | Numeric values convert (float truncates toward zero). Strings are parsed strictly with `strconv.ParseInt` base-10 (trimmed whitespace, no `0x`, no trailing garbage). |
+| `string(v)`     | `(any) -> string`               | Passthrough for strings, cycle-safe `%v`-style formatting otherwise, `""` for nil. |
+| `int(v)`        | `(any) -> int64, error`         | Numeric values convert (float truncates toward zero; NaN, Inf, and out-of-`int64` values error). Strings are parsed strictly with `strconv.ParseInt` base-10 (trimmed whitespace, no `0x`, no trailing garbage). |
 | `float(v)`      | `(any) -> float64, error`       | Like `int`, but `strconv.ParseFloat` 64-bit. |
 | `bool(v)`       | `(any) -> bool`                 | Same semantics as [truthiness](#truthiness). |
-| `contains(h,n)` | `(any, any) -> bool, error`     | Substring for string haystacks, element membership for slices/arrays (using [loose equality](#equality)), key presence for string-keyed maps. |
-| `has(m,k)`      | `(any, string) -> bool, error`  | True if map `m` has key `k`. Maps only. Nil → `false`. |
-| `keys(m)`       | `(any) -> []any, error`         | Sorted string keys. Other key types → error. |
+| `contains(h,n)` | `(any, any) -> bool, error`     | Substring for string-like haystacks, element membership for slices/arrays (using [loose equality](#equality)), key presence for string-like-keyed maps. |
+| `has(m,k)`      | `(any, string) -> bool, error`  | True if map `m` has string-like key `k`. Maps only. Nil → `false`. |
+| `keys(m)`       | `(any) -> []any, error`         | Sorted string-like keys. Other key types → error. |
 | `lower(s)`      | `(string) -> string`            | `strings.ToLower`. |
 | `upper(s)`      | `(string) -> string`            | `strings.ToUpper`. |
-| `sprintf(f,...)`| `(string, ...any) -> string`    | `fmt.Sprintf`. |
+| `sprintf(f,...)`| `(string, ...any) -> string`    | `fmt.Sprintf`-style formatting with cycle-safe handling for recursive map/slice/pointer values. |
 
 ## Higher-order special forms
 
