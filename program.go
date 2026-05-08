@@ -962,7 +962,7 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		scope.index = int64(i)
 		v, err := p.eval(ctx, call.Args[1], scope, depth)
 		if err != nil {
-			return nil, true, err
+			return nil, true, wrapPredicateErr("filter", call.Args[1], i, err)
 		}
 		if !isTruthy(v) {
 			continue

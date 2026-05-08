@@ -125,6 +125,14 @@ you need to).
 | `count(list, pred)`   | `int64`          | Number of matches                                     |
 | `try(value, default)` | value or default | `value` if it evaluates cleanly, else `default`       |
 
+When a predicate inside an iterating form errors, the form wraps
+the error with its name, the predicate's source text, and the failing
+element's index, e.g.
+``map predicate `it.Nmae` failed on element 3: ...``. Nested forms
+add their own layer. The wrapping preserves the underlying chain so
+`errors.Is(err, ErrEvaluate)` still matches; cancellation passes
+through unchanged.
+
 `try` is the odd one out: it does not iterate a list, binds no `it`
 or `index`, and traps anything wrapping `ErrEvaluate` (missing keys,
 nil selectors, out-of-range indices, `int`/`float` parse failures).

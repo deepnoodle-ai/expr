@@ -361,6 +361,22 @@ The `list` argument must be a slice or array (or `nil`, which is
 treated as empty). Maps are not iterated by these forms; use
 `keys(m)` (from `WithBuiltins`) to drive a map iteration manually.
 
+When a predicate raises an `ErrEvaluate`, the iterating forms wrap
+the error with the form name, the predicate's source text, and the
+failing element's index. A typo inside `map(users, it.Nmae)` therefore
+reads:
+
+```
+map predicate `it.Nmae` failed on element 0: ... field "Nmae" not found ...
+```
+
+Nested forms each contribute their own layer, so the wrapping reads
+top-down through the iteration tree. The internal `map` rewrite is
+reversed in the printed predicate, so users see the source as they
+typed it. The wrapping preserves the underlying error chain
+(`errors.Is(err, ErrEvaluate)` still matches); context cancellation
+passes through unchanged.
+
 `try(value, default)` is the odd one out: it does not iterate a list
 and binds no implicit `it`/`index`. Both arguments are arbitrary
 expressions. The `default` is **only** evaluated when `value` failed,
