@@ -14,8 +14,42 @@ import (
 // to list, the hint reads `(available: a, b, c)`. When neither
 // condition holds the hint is empty, so the original error message is
 // unchanged.
+//
+// Higher-order forms get a tailored hint instead. If the unresolved
+// name is itself a form (`count`, `filter`, `try`, ...), the hint
+// reports it as a special form and shows the call signature so the
+// user knows it must be invoked as `count(xs, predicate)` rather
+// than referenced as a value.
 func identHint(env any, funcs map[string]any, name string, fieldTags *structTagConfig) string {
+	if hint, ok := specialFormHint(name); ok {
+		return hint
+	}
 	return formatHint(name, availableIdents(env, funcs, fieldTags))
+}
+
+// specialFormHint returns the "is a special form" message when name
+// matches one of the higher-order forms exactly. The signature shown
+// matches the form's actual arity so users see the correct shape
+// (`try(value, default)` vs `count(xs, predicate)`).
+func specialFormHint(name string) (string, bool) {
+	sig, ok := formCallHints[name]
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf(" (%q is a special form, did you mean to call %s?)", name, sig), true
+}
+
+// formCallHints maps each higher-order form to its call signature for
+// use in "is a special form" hints. Kept in lockstep with
+// higherOrderForms in higher_order.go.
+var formCallHints = map[string]string{
+	"map":    "map(xs, predicate)",
+	"filter": "filter(xs, predicate)",
+	"any":    "any(xs, predicate)",
+	"all":    "all(xs, predicate)",
+	"find":   "find(xs, predicate)",
+	"count":  "count(xs, predicate)",
+	"try":    "try(value, default)",
 }
 
 // fieldHint is identHint's counterpart for selector and index
@@ -66,6 +100,15 @@ func closestName(name string, candidates []string) (string, bool) {
 	best := -1
 	var bestName string
 	for _, c := range candidates {
+		// Skip exact matches: a hint of `did you mean "count"?` is
+		// noise when the user already typed that name. Exact-match
+		// candidates only reach this loop for higher-order forms
+		// (whose names appear in the candidate set even though the
+		// evaluator could not resolve them as identifiers).
+		// specialFormHint handles those cases separately.
+		if c == name {
+			continue
+		}
 		d := levenshtein(name, c)
 		if d <= threshold && (best == -1 || d < best) {
 			best = d

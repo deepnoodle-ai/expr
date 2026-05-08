@@ -282,6 +282,10 @@ All parse failures wrap `ErrCompile`. All runtime failures wrap
 are wrapped so `errors.Is` and `errors.As` still find the original cause.
 Unknown identifiers, fields, and keys get a Levenshtein-based
 "did you mean...?" hint drawn from what's actually in scope.
+Higher-order forms (`map`, `filter`, `any`, `all`, `find`, `count`,
+`try`) referenced as bare identifiers get a tailored hint showing
+their call signature, e.g. `"count" is a special form, did you
+mean to call count(xs, predicate)?`.
 
 ```go
 if errors.Is(err, expr.ErrCompile) { /* ... */ }

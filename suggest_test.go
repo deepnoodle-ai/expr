@@ -32,6 +32,32 @@ func TestSuggest_UndefinedIdentAvailableList(t *testing.T) {
 	require.Contains(t, err.Error(), "alpha")
 }
 
+func TestSuggest_SpecialFormUsedAsValue(t *testing.T) {
+	// A bare reference to a special form like `count` can't resolve as
+	// an identifier; the hint should explain it is a special form and
+	// show the call signature, not loop back to "did you mean count?".
+	_, err := evalExpr(t.Context(), "count", nil)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), `undefined identifier "count"`)
+	require.Contains(t, err.Error(), `"count" is a special form, did you mean to call count(xs, predicate)?`)
+}
+
+func TestSuggest_SpecialFormTrySignature(t *testing.T) {
+	// `try` has a different signature than the other forms; the hint
+	// should reflect that.
+	_, err := evalExpr(t.Context(), "try", nil)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), `"try" is a special form, did you mean to call try(value, default)?`)
+}
+
+func TestSuggest_SpecialFormMap(t *testing.T) {
+	// `map` is rewritten internally before parsing; the user-facing
+	// hint must still display "map", not the rewritten sentinel.
+	_, err := evalExpr(t.Context(), "map", nil)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), `"map" is a special form, did you mean to call map(xs, predicate)?`)
+}
+
 func TestSuggest_MissingStructField(t *testing.T) {
 	p := person{Name: "Alice", Age: 30}
 	env := map[string]any{"p": p}
