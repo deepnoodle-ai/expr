@@ -123,7 +123,7 @@ func TestLiteral_Char(t *testing.T) {
 func TestLiteral_ImagUnsupported(t *testing.T) {
 	// Imaginary literals parse but expr doesn't model complex numbers.
 	_, err := evalExpr(t.Context(), "1i", nil)
-	require.ErrorIs(t, err, ErrEvaluate)
+	require.ErrorIs(t, err, ErrCompile)
 }
 
 func TestLiteral_IntOverflow(t *testing.T) {

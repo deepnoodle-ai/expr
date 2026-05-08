@@ -39,7 +39,7 @@ func Rewrite(src string) string {
 	if len(toks) == 0 {
 		return src
 	}
-	edits := plan(toks)
+	edits := plan(src, toks)
 	if len(edits) == 0 {
 		return src
 	}
@@ -100,9 +100,7 @@ type edit struct {
 	str string
 }
 
-// Stack markers for bracket pairing. We push on '[' and pop on ']';
-// we never stack braces because '{' and '}' map to themselves in the
-// output (either directly or via a pre-inserted type prefix).
+// Stack markers for bracket pairing. We push on '[' and pop on ']'.
 const (
 	frameArray byte = 'a' // array literal: '['→'[]any{', ']'→'}'
 	frameIndex byte = 'i' // index or type bracket: leave both alone
@@ -110,16 +108,27 @@ const (
 	frameEmpty byte = 'e' // '[]' empty array: single edit spans both
 )
 
+// Brace-stack markers. We track each '{' so the rule for nested '{'
+// can depend on whether the enclosing brace is an object literal or
+// a typed composite literal — and, in the typed case, whether its
+// element type is one for which jsonlit's bare-{ rewrite is desired.
+const (
+	braceObject byte = 'o' // bare '{...}' rewritten to map[string]any{...}
+	braceAny    byte = 'a' // typed composite whose element/value type is `any` or `interface{}`
+	braceInert  byte = 'i' // any other typed composite — leave nested {...} alone
+)
+
 // plan walks the token stream once and records the edits needed to
 // turn bare bracket/brace literals into typed composite literals.
 // The algorithm is: precompute each '[' to its matching ']', then
 // classify each '[' by context (prev token, content, following
 // token) and pair it with its close via a small stack. Each '{' is
-// classified by its preceding token; '}' is always left alone.
-func plan(toks []tokenInfo) []edit {
+// classified by its preceding token and the brace stack.
+func plan(src string, toks []tokenInfo) []edit {
 	matches := matchBrackets(toks)
 	var edits []edit
 	var stack []byte
+	var braces []byte
 	prev := token.ILLEGAL
 
 	for i, t := range toks {
@@ -136,10 +145,14 @@ func plan(toks []tokenInfo) []edit {
 					prev = t.kind
 					continue
 				}
+				// Emit two edits rather than a single splice over the
+				// whole pair so that any comments between '[' and ']'
+				// are preserved verbatim in the output.
 				edits = append(edits, edit{
-					pos: t.pos,
-					end: toks[i+1].end,
-					str: "[]any{}",
+					pos: t.pos, end: t.end, str: "[]any{",
+				})
+				edits = append(edits, edit{
+					pos: toks[i+1].pos, end: toks[i+1].end, str: "}",
 				})
 				stack = append(stack, frameEmpty)
 				prev = t.kind
@@ -154,15 +167,13 @@ func plan(toks []tokenInfo) []edit {
 			}
 			// The remaining case is "[N]...". It could be either an
 			// array literal [a, b, c] or a Go array-type expression
-			// [N]T. We classify it as an array type only when it is
-			// unambiguously one: no top-level comma in the brackets,
-			// and the token after the matching ']' starts a type
-			// (IDENT, map, interface, etc. — but not another '['
-			// because that collides with literal-then-index chains
-			// like [1][0]).
+			// [N]T (including [N][M]T, [N][]T, etc.). We classify it
+			// as an array type only when it is unambiguously one: no
+			// top-level comma in the brackets, and the token after
+			// the matching ']' starts a type expression.
 			if close, ok := matches[i]; ok &&
 				!hasTopLevelComma(toks, i, close) &&
-				isArrayTypeFollow(toks, close+1) {
+				isArrayTypeFollow(toks, close+1, matches) {
 				stack = append(stack, frameIndex)
 				break
 			}
@@ -187,12 +198,37 @@ func plan(toks []tokenInfo) []edit {
 
 		case token.LBRACE:
 			// '{' is left alone only when it follows a token that
-			// could be a type name or type expression. Everything
-			// else is treated as a bare map-object literal.
-			if !followsTypeName(prev) {
+			// could be a type name or type expression — or when the
+			// enclosing typed composite has a structured element type
+			// (e.g. []struct{X int}{{1}}, [][]int{{1,2}}), where Go's
+			// type-omission rule applies and we must not splice a
+			// bogus map[string]any prefix in front of it.
+			leave := followsTypeName(prev)
+			if !leave && len(braces) > 0 &&
+				braces[len(braces)-1] == braceInert &&
+				(prev == token.LBRACE || prev == token.COMMA || prev == token.COLON) {
+				leave = true
+			}
+			if !leave {
 				edits = append(edits, edit{
 					pos: t.pos, end: t.pos, str: "map[string]any",
 				})
+				braces = append(braces, braceObject)
+				break
+			}
+			// Typed composite. Decide whether its element type is
+			// `any`/`interface{}` (in which case nested bare {...}
+			// should still be rewritten to map[string]any) or some
+			// other structured type (leave nested {...} alone).
+			if followsTypeName(prev) && elementIsAnyOrInterface(src, toks, i) {
+				braces = append(braces, braceAny)
+			} else {
+				braces = append(braces, braceInert)
+			}
+
+		case token.RBRACE:
+			if len(braces) > 0 {
+				braces = braces[:len(braces)-1]
 			}
 		}
 
@@ -210,9 +246,10 @@ func plan(toks []tokenInfo) []edit {
 // in a type position: identifiers (user types and builtins like
 // "any"/"int"), another '[' for [][]T chains, the 'map' keyword
 // for []map[K]V, 'interface' for []interface{}, and defensively
-// 'struct', 'chan', 'func', and '*' for pointer types. If i runs
-// off the end, we conservatively say no — bare "[]" at end of input
-// is an empty array literal.
+// 'struct', 'chan', 'func', '*' for pointer types, and '<-' for
+// receive-only channel types ([]<-chan T). If i runs off the end,
+// we conservatively say no — bare "[]" at end of input is an empty
+// array literal.
 func isSliceTypeFollow(toks []tokenInfo, i int) bool {
 	if i >= len(toks) {
 		return false
@@ -220,7 +257,7 @@ func isSliceTypeFollow(toks []tokenInfo, i int) bool {
 	switch toks[i].kind {
 	case token.IDENT, token.LBRACK,
 		token.MAP, token.INTERFACE, token.STRUCT,
-		token.CHAN, token.FUNC, token.MUL:
+		token.CHAN, token.FUNC, token.MUL, token.ARROW:
 		return true
 	}
 	return false
@@ -228,20 +265,27 @@ func isSliceTypeFollow(toks []tokenInfo, i int) bool {
 
 // isArrayTypeFollow is the variant used after a non-empty "[N]" to
 // decide whether the pair is the length prefix of an array-type
-// expression like [N]T. It deliberately omits '[' from the accepted
-// set that isSliceTypeFollow allows, because "[N][...]" is more
-// commonly a literal-then-index chain ([1][0]) in JSON-extended
-// expressions than a 2D array type ([3][4]int), and expr does not
-// accept Go array-type literals anyway.
-func isArrayTypeFollow(toks []tokenInfo, i int) bool {
+// expression like [N]T or [N][M]T. To keep "[1][0]" working as
+// literal-then-index, an inner '[' is only accepted when it is
+// itself part of an array/slice type expression — i.e., its own
+// matching ']' is followed by something that begins a type.
+func isArrayTypeFollow(toks []tokenInfo, i int, matches map[int]int) bool {
 	if i >= len(toks) {
 		return false
 	}
 	switch toks[i].kind {
 	case token.IDENT,
 		token.MAP, token.INTERFACE, token.STRUCT,
-		token.CHAN, token.FUNC, token.MUL:
+		token.CHAN, token.FUNC, token.MUL, token.ARROW:
 		return true
+	case token.LBRACK:
+		// "[N][...]": classify the outer "[N]" as an array type only
+		// when the inner bracket pair is itself a type prefix.
+		close, ok := matches[i]
+		if !ok {
+			return false
+		}
+		return isArrayTypeFollow(toks, close+1, matches)
 	}
 	return false
 }
@@ -306,22 +350,116 @@ func leaveBracketAlone(prev token.Token) bool {
 }
 
 // followsTypeName reports whether a '{' following this token is the
-// body of a typed composite literal and should be left alone. We
-// accept identifiers (user types or builtins), the 'map'/'struct'/
-// 'interface'/'chan'/'func' keywords, and '}' — the last of these
-// catches compound type forms like []interface{}{1} and struct{X
-// int}{X: 1}, where the composite-literal body opens immediately
-// after a type-body close brace. Everything else is treated as a
-// bare object literal.
+// body of a typed composite literal or function literal and should
+// be left alone. We accept identifiers (user types or builtins),
+// the 'map'/'struct'/'interface'/'chan'/'func' keywords, '}' for
+// compound type forms like []interface{}{1} and struct{X int}{X: 1}
+// where the composite-literal body opens immediately after a
+// type-body close brace, ')' for function-literal bodies like
+// `func() {}`, and ']' for generic instantiations like `List[int]{}`
+// (in expression position '][{' only occurs after a type, since
+// indexing followed by a composite literal is not a valid Go
+// expression). Everything else is treated as a bare object literal.
 func followsTypeName(prev token.Token) bool {
 	switch prev {
 	case token.IDENT,
 		token.MAP, token.STRUCT, token.INTERFACE,
 		token.CHAN, token.FUNC,
-		token.RBRACE:
+		token.RBRACE, token.RPAREN, token.RBRACK:
 		return true
 	}
 	return false
+}
+
+// elementIsAnyOrInterface reports whether the type immediately
+// preceding the '{' at toks[idx] is exactly `[]any`, `map[string]any`,
+// `[]interface{}`, or `map[string]interface{}`. These are the typed
+// composite forms whose element/value type is `any` or `interface{}`,
+// for which Go does not allow type omission and so jsonlit's bare-{
+// rewrite is needed (e.g. `map[string]any{"k": {"j": 1}}`). For any
+// other typed outer (struct slices, slice-of-slice, simple typed
+// slices, etc.) Go accepts type omission, and we must leave nested
+// {...} alone.
+func elementIsAnyOrInterface(src string, toks []tokenInfo, idx int) bool {
+	if idx < 1 {
+		return false
+	}
+	j := idx - 1
+	var bracketEnd int
+	switch toks[j].kind {
+	case token.IDENT:
+		if literalAt(src, toks[j]) != "any" {
+			return false
+		}
+		bracketEnd = j - 1
+	case token.RBRACE:
+		// `interface{}` body: ... interface { } {
+		if j < 2 ||
+			toks[j-1].kind != token.LBRACE ||
+			toks[j-2].kind != token.INTERFACE {
+			return false
+		}
+		bracketEnd = j - 3
+	default:
+		return false
+	}
+	if bracketEnd < 0 || toks[bracketEnd].kind != token.RBRACK {
+		return false
+	}
+	// Find the matching '['.
+	depth := 1
+	for k := bracketEnd - 1; k >= 0; k-- {
+		switch toks[k].kind {
+		case token.RBRACK:
+			depth++
+		case token.LBRACK:
+			depth--
+			if depth != 0 {
+				continue
+			}
+			// Slice/array prefix: empty brackets `[]any` / `[]interface{}`.
+			if bracketEnd-k == 1 {
+				return !typeWraps(toks, k)
+			}
+			// Map prefix: `map[string]any` / `map[string]interface{}`.
+			if bracketEnd-k == 2 &&
+				toks[k+1].kind == token.IDENT &&
+				literalAt(src, toks[k+1]) == "string" &&
+				k > 0 && toks[k-1].kind == token.MAP {
+				return !typeWraps(toks, k-1)
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// typeWraps reports whether the type starting at toks[k] is itself
+// the value/element of an outer composite type — i.e., whether
+// toks[k-1] closes a wrapping `]` or `}`. When that is the case,
+// the type at toks[k:] is not a top-level `[]any`/`map[string]any`
+// (e.g. it's `[]any` inside `[][]any` or `map[string]any` inside
+// `[]map[string]any`), and Go's type-omission rules govern nested
+// composite literals — leave them alone.
+func typeWraps(toks []tokenInfo, k int) bool {
+	if k == 0 {
+		return false
+	}
+	switch toks[k-1].kind {
+	case token.RBRACK, token.RBRACE:
+		return true
+	}
+	return false
+}
+
+// literalAt returns the source text for the given token. Identifier
+// and string tokens are stored with positions only, so we read them
+// out of the original source.
+func literalAt(src string, t tokenInfo) string {
+	if t.pos < 0 || t.end > len(src) || t.pos > t.end {
+		return ""
+	}
+	return src[t.pos:t.end]
 }
 
 // apply splices edits into src. Edits are produced by plan in
