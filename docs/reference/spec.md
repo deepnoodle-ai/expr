@@ -355,10 +355,30 @@ element and the outer `it` is no longer reachable until the inner
 | `all(list, pred)`    | `bool`                     | `true` if `pred` is truthy for every element; short-circuits. Empty list → `true`. |
 | `find(list, pred)`   | element or `nil`           | First element for which `pred` is truthy, or `nil`. |
 | `count(list, pred)`  | `int64`                    | Number of elements for which `pred` is truthy. |
+| `try(value, default)`| value or `default`         | Evaluates `value`; returns `default` if `value` raised an `ErrEvaluate` (missing key, type error, out-of-range index, etc.). The `default` expression is only evaluated when the primary fails. |
 
 The `list` argument must be a slice or array (or `nil`, which is
 treated as empty). Maps are not iterated by these forms; use
 `keys(m)` (from `WithBuiltins`) to drive a map iteration manually.
+
+`try(value, default)` is the odd one out: it does not iterate a list
+and binds no implicit `it`/`index`. Both arguments are arbitrary
+expressions. The `default` is **only** evaluated when `value` failed,
+so users can supply expensive or side-effecting fallbacks safely.
+
+`try` traps anything wrapping `ErrEvaluate`: missing fields/keys, nil
+selectors, out-of-range indices, type-coercion failures from `int`,
+`float`, etc. It does **not** trap raw `context.Canceled` or
+`context.DeadlineExceeded` (cancellation must remain observable), nor
+anything wrapping `ErrCompile`. Errors from evaluating the `default`
+expression itself surface unchanged. Combine with operand-returning
+`||` for the common case of presenting `nil` as a sentinel:
+
+```
+try(find(events, it.kind == "purchase").user, "—")
+try(int(input), 0) > 0
+try(user.nickname, nil) || "(none)"
+```
 
 Special-form names can be shadowed: if `WithFunctions` registers a
 function with the same name, or the caller's env contains an entry
