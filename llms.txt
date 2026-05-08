@@ -272,6 +272,10 @@ See `docs/guides/examples.md` for worked multi-line expressions.
   `xs || []`, `count || 0`. Wrap with `bool(...)` when you need a
   strict bool.
 - **String indexing** counts runes, matching `len` on strings.
+- **Slice / string indices** accept integer-valued floats (`xs[1.0]`
+  works, `xs[1.5]` errors), matching the "ints and floats fungible
+  when integral" arithmetic rule. JSON-derived indices arrive as
+  float64, so this removes a CLI papercut.
 - **Selectors and index errors:** missing map keys, missing struct
   fields, nil selectors, and out-of-bounds indexes all return
   `ErrEvaluate` — expr never panics on well-formed env input.

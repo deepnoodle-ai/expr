@@ -661,14 +661,30 @@ func TestAdversarial_NegativeIndex(t *testing.T) {
 	require.Error(t, err)
 }
 
-// --- 39. Map index with int idx but the idx is float64 (1.0) ---
+// --- 39. Slice index with float64 ---
 
+// Integer-valued floats (1.0) are accepted as indices, matching the
+// "ints and floats are fungible when integral" rule used by
+// arithmetic. JSON-derived numbers arrive as float64 so accepting
+// them removes a CLI papercut. Non-integer floats still error.
 func TestAdversarial_FloatIndexOnSlice(t *testing.T) {
-	env := map[string]any{"xs": []any{int64(1), int64(2), int64(3)}}
+	env := map[string]any{"xs": []any{int64(10), int64(20), int64(30)}}
+
 	got, err := evalExpr(t.Context(), "xs[1.0]", env)
-	t.Logf("xs[1.0] => %v, err=%v", got, err)
-	// toInt64 doesn't accept float; should error rather than silently work.
-	require.Error(t, err)
+	require.NoError(t, err)
+	require.Equal(t, int64(20), got)
+
+	_, err = evalExpr(t.Context(), "xs[1.5]", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "index must be integer")
+
+	got, err = evalExpr(t.Context(), `s[2.0]`, map[string]any{"s": "hello"})
+	require.NoError(t, err)
+	require.Equal(t, "l", got)
+
+	_, err = evalExpr(t.Context(), `s[2.5]`, map[string]any{"s": "hello"})
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "index must be integer")
 }
 
 // --- 40. Nested template inside composite literal ---

@@ -351,6 +351,32 @@ func truncFloatToInt64(f float64, target string) (int64, error) {
 	return int64(t), nil
 }
 
+// toIndexInt converts an evaluated index value to int64. Integers of
+// any kind pass through. Floats are accepted only when their value is
+// finite and exactly integral, matching expr's "ints and floats are
+// fungible when integral" arithmetic rule. Non-integer or non-numeric
+// indices return an ErrEvaluate-wrapped error suitable for surfacing
+// directly to callers.
+func toIndexInt(v any) (int64, error) {
+	if i, ok := toInt64(v); ok {
+		return i, nil
+	}
+	if f, ok := toFloat64(v); ok {
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, fmt.Errorf("%w: index must be integer, got %v", ErrEvaluate, f)
+		}
+		t := math.Trunc(f)
+		if t != f {
+			return 0, fmt.Errorf("%w: index must be integer, got %v", ErrEvaluate, f)
+		}
+		if t >= int64LimitFloat || t < -int64LimitFloat {
+			return 0, fmt.Errorf("%w: index %v out of int64 range", ErrEvaluate, f)
+		}
+		return int64(t), nil
+	}
+	return 0, fmt.Errorf("%w: index must be integer, got %T", ErrEvaluate, v)
+}
+
 func mapStringKey(keyType reflect.Type, key string) reflect.Value {
 	kv := reflect.ValueOf(key)
 	if kv.Type().AssignableTo(keyType) {

@@ -1000,18 +1000,18 @@ func indexValue(recv, idx any) (any, error) {
 	rv := reflect.ValueOf(recv)
 	switch rv.Kind() {
 	case reflect.Slice, reflect.Array:
-		i, ok := toInt64(idx)
-		if !ok {
-			return nil, fmt.Errorf("%w: index must be integer, got %T", ErrEvaluate, idx)
+		i, err := toIndexInt(idx)
+		if err != nil {
+			return nil, err
 		}
 		if i < 0 || i >= int64(rv.Len()) {
 			return nil, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, rv.Len())
 		}
 		return rv.Index(int(i)).Interface(), nil
 	case reflect.String:
-		i, ok := toInt64(idx)
-		if !ok {
-			return nil, fmt.Errorf("%w: index must be integer, got %T", ErrEvaluate, idx)
+		i, err := toIndexInt(idx)
+		if err != nil {
+			return nil, err
 		}
 		runes := []rune(rv.String())
 		if i < 0 || i >= int64(len(runes)) {
