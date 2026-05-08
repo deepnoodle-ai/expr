@@ -1,11 +1,15 @@
 package expr
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/printer"
+	"go/token"
 	"reflect"
+	"strings"
 )
 
 // itEnv is a scope chain used by the higher-order special forms. It
@@ -99,8 +103,16 @@ func checkFormArity(name string, got int) error {
 // forEach is the shared loop used by every higher-order form. The
 // body closure observes `ctx.Err()` through `p.eval` automatically,
 // so a cancelled context aborts the iteration at the next element.
+//
+// Predicate errors are wrapped with the form name, the failing
+// element's index, and the predicate's source text so users can
+// locate the failure inside nested expressions. Cancellation errors
+// and anything else that is not an ErrEvaluate pass through unchanged
+// so callers can still match on context.Canceled /
+// context.DeadlineExceeded.
 func (p *Program) forEach(
 	ctx context.Context,
+	name string,
 	items []any,
 	predicate ast.Expr,
 	env any,
@@ -113,7 +125,7 @@ func (p *Program) forEach(
 		scope.index = int64(i)
 		v, err := p.eval(ctx, predicate, scope, depth)
 		if err != nil {
-			return err
+			return wrapPredicateErr(name, predicate, i, err)
 		}
 		stop, err := body(item, v)
 		if err != nil {
@@ -126,6 +138,44 @@ func (p *Program) forEach(
 	return nil
 }
 
+// wrapPredicateErr decorates a predicate-evaluation error with the
+// form name, the predicate's source text, and the failing element's
+// index. Errors that do not wrap ErrEvaluate (notably
+// context.Canceled and context.DeadlineExceeded, which are returned
+// raw by the evaluator) pass through unchanged so callers can still
+// match on them with errors.Is.
+func wrapPredicateErr(name string, predicate ast.Expr, index int, err error) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrEvaluate) {
+		return err
+	}
+	src := formatPredicate(predicate)
+	if src == "" {
+		return fmt.Errorf("%s predicate failed on element %d: %w", name, index, err)
+	}
+	return fmt.Errorf("%s predicate `%s` failed on element %d: %w", name, src, index, err)
+}
+
+// formatPredicate prints a predicate AST back to source text for
+// inclusion in error messages. The internal map sentinel is
+// translated back to `map` so nested forms read the way users wrote
+// them. Returns "" if printing fails or if the result contains a
+// backtick (which would clash with the surrounding error format),
+// letting wrapPredicateErr fall back to a position-only message.
+func formatPredicate(node ast.Expr) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, token.NewFileSet(), node); err != nil {
+		return ""
+	}
+	out := strings.ReplaceAll(buf.String(), mapFormName, "map")
+	if strings.ContainsRune(out, '`') {
+		return ""
+	}
+	return out
+}
+
 func formMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
 	if err := checkFormArity("map", len(n.Args)); err != nil {
 		return nil, err
@@ -135,7 +185,7 @@ func formMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 		return nil, err
 	}
 	out := make([]any, 0, len(items))
-	err = p.forEach(ctx, items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "map", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
 		out = append(out, v)
 		return false, nil
 	})
@@ -154,7 +204,7 @@ func formFilter(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth
 		return nil, err
 	}
 	out := make([]any, 0, len(items))
-	err = p.forEach(ctx, items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
+	err = p.forEach(ctx, "filter", items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
 		if isTruthy(v) {
 			out = append(out, item)
 		}
@@ -175,7 +225,7 @@ func formAny(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 		return nil, err
 	}
 	found := false
-	err = p.forEach(ctx, items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "any", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
 		if isTruthy(v) {
 			found = true
 			return true, nil
@@ -197,7 +247,7 @@ func formAll(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 		return nil, err
 	}
 	ok := true
-	err = p.forEach(ctx, items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "all", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
 		if !isTruthy(v) {
 			ok = false
 			return true, nil
@@ -220,7 +270,7 @@ func formFind(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth i
 	}
 	var match any
 	matched := false
-	err = p.forEach(ctx, items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
+	err = p.forEach(ctx, "find", items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
 		if isTruthy(v) {
 			match = item
 			matched = true
@@ -246,7 +296,7 @@ func formCount(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth 
 		return nil, err
 	}
 	var total int64
-	err = p.forEach(ctx, items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "count", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
 		if isTruthy(v) {
 			total++
 		}

@@ -3,6 +3,7 @@ package expr
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/deepnoodle-ai/expr/internal/require"
@@ -166,8 +167,124 @@ func TestHigherOrder_PredicateError(t *testing.T) {
 	env := map[string]any{"users": sampleUsers()}
 	_, err := evalExpr(t.Context(), "map(users, it.Nmae)", env)
 	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "map predicate `it.Nmae` failed on element 0:")
 	require.Contains(t, err.Error(), `field "Nmae" not found`)
 	require.Contains(t, err.Error(), `did you mean "Name"?`)
+}
+
+// Predicate errors include the index of the failing element so users
+// can locate the failure inside long collections. The first two
+// elements pass through cleanly; the third has no Name field, which is
+// where the wrapping should report.
+func TestHigherOrder_PredicateErrorReportsIndex(t *testing.T) {
+	env := map[string]any{
+		"items": []any{
+			map[string]any{"Name": "a"},
+			map[string]any{"Name": "b"},
+			map[string]any{"Other": "c"},
+		},
+	}
+	_, err := evalExpr(t.Context(), "map(items, it.Name)", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "map predicate `it.Name` failed on element 2:")
+}
+
+// Nested forms each contribute their own wrapping layer. The inner
+// map prints as `map(it, it.bad)` and shows the inner failing element;
+// the outer map prints the full inner expression and reports the
+// outer index. Internal sentinel rewriting is reversed so the printed
+// source reads as the user originally typed it.
+func TestHigherOrder_PredicateErrorNestedForms(t *testing.T) {
+	env := map[string]any{
+		"matrix": []any{
+			[]any{int64(1)},
+			[]any{int64(2)},
+		},
+	}
+	_, err := evalExpr(t.Context(), "map(matrix, map(it, it.bad))", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	// The inner map prints as `map(it, it.bad)` and reports element 0
+	// of the inner list.
+	require.Contains(t, err.Error(), "map predicate `it.bad` failed on element 0:")
+	// The outer map wraps with the full inner predicate text.
+	require.Contains(t, err.Error(), "map predicate `map(it, it.bad)` failed on element 0:")
+	// The internal `__expr_map__` sentinel must not leak into messages.
+	require.False(t,
+		strings.Contains(err.Error(), mapFormName),
+		"map sentinel leaked into error: %s", err.Error())
+}
+
+// Each form name appears in its own wrapping. Spot-check the names
+// rather than enumerating: filter, find, count, any, all all flow
+// through the same forEach so a single fixture per name suffices.
+func TestHigherOrder_PredicateErrorFormNames(t *testing.T) {
+	cases := []struct {
+		expr string
+		want string
+	}{
+		{`filter(items, it.bad)`, "filter predicate `it.bad` failed on element 0"},
+		{`find(items, it.bad)`, "find predicate `it.bad` failed on element 0"},
+		{`count(items, it.bad)`, "count predicate `it.bad` failed on element 0"},
+		{`any(items, it.bad)`, "any predicate `it.bad` failed on element 0"},
+		{`all(items, it.bad)`, "all predicate `it.bad` failed on element 0"},
+	}
+	env := map[string]any{"items": []any{map[string]any{"good": 1}}}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			_, err := evalExpr(t.Context(), tc.expr, env)
+			require.ErrorIs(t, err, ErrEvaluate)
+			require.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// The filter(xs, p)[N] fast path in program.go has its own iteration
+// loop. Predicate failures there should match the slow path's wrapping
+// so the fast path is not a debuggability regression. The first item
+// matches and the second is missing the field, so reaching index 1 of
+// the filtered result forces the predicate to evaluate on the second
+// element and fail there.
+func TestHigherOrder_PredicateErrorFilterIndexFastPath(t *testing.T) {
+	env := map[string]any{
+		"items": []any{
+			map[string]any{"Name": "a"},
+			map[string]any{"Other": "b"},
+		},
+	}
+	_, err := evalExpr(t.Context(), "filter(items, it.Name)[1]", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "filter predicate `it.Name` failed on element 1:")
+}
+
+// A predicate that contains a backtick character would clash with the
+// backtick delimiters used in the error message, so the wrapping
+// falls back to a position-only form. Reaches the formatPredicate
+// fallback path defensively.
+func TestHigherOrder_PredicateErrorBacktickFallback(t *testing.T) {
+	env := map[string]any{"items": []any{map[string]any{"good": 1}}}
+	_, err := evalExpr(t.Context(), "map(items, it.bad == `oops`)", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "map predicate failed on element 0:")
+	require.False(t,
+		strings.Contains(err.Error(), "predicate `"),
+		"backtick-bearing predicate should not be embedded, got %s", err.Error())
+}
+
+// Cancellation must not be wrapped as a predicate error so callers can
+// still match it with errors.Is(err, context.Canceled).
+func TestHigherOrder_PredicateErrorIgnoresCancellation(t *testing.T) {
+	ctxC, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := []Option{WithFunctions(map[string]any{
+		"stop": func() bool { cancel(); return true },
+	})}
+	env := map[string]any{"xs": []any{int64(1), int64(2), int64(3)}}
+	_, err := evalExpr(ctxC, "map(xs, stop() && it)", env, opts...)
+	require.True(t, errors.Is(err, context.Canceled),
+		"expected context.Canceled, got %v", err)
+	require.False(t,
+		strings.Contains(err.Error(), "failed on element"),
+		"cancellation should not be wrapped, got %v", err)
 }
 
 func TestHigherOrder_UserFuncOverride(t *testing.T) {
