@@ -180,25 +180,45 @@ func Compile(code string, opts ...Option) (*Program, error) {
 // identifier.
 const mapFormName = "__expr_map__"
 
+// ifFuncName is the internal identifier that `if` is rewritten to
+// before parsing. `if` is a Go statement keyword, so the expression
+// parser refuses it as an operand; the rewrite makes the builtin
+// callable as `if(cond, t, f)` while keeping the user-visible name
+// in error messages and method lookups.
+const ifFuncName = "__expr_if__"
+
+// keywordRewrites lists the Go keyword tokens that expr accepts as
+// ordinary identifiers. Each entry maps the source spelling to its
+// internal sentinel; preprocessSource walks tokens and substitutes
+// occurrences in place.
+var keywordRewrites = []struct {
+	tok      token.Token
+	src      string
+	internal string
+}{
+	{token.MAP, "map", mapFormName},
+	{token.IF, "if", ifFuncName},
+}
+
 // preprocessSource rewrites Go keyword tokens that expr wants to
-// accept as ordinary identifiers. The only such token is `map`: Go's
-// parser treats `map` as the start of a map-type literal everywhere
-// it appears, so expr cannot accept `map(xs, pred)`, `obj.map(...)`,
-// or any other construct that names `map` as an identifier.
+// accept as ordinary identifiers (`map`, `if`). Go's parser treats
+// these as the start of a map-type literal or an if-statement, so
+// expr cannot accept `map(xs, pred)` or `if(cond, t, f)` as-is;
+// preprocessSource substitutes a sentinel identifier so the parser
+// sees a plain CallExpr, and the evaluator translates the sentinel
+// back via displayIdent for lookups and error messages.
 //
-// The rewrite replaces every `map` token with mapFormName *unless*
-// the next token is `[`, which would indicate a Go map type literal
-// like `map[string]int{}`. Composite literals are unsupported by
-// expr anyway, so leaving that one case alone lets the parser emit
-// its normal error for unsupported syntax. Selector, call, and
-// method-call forms all carry the rewritten identifier through to
-// the evaluator, which translates it back to "map" in lookups and
-// error messages via mapFormDisplayName.
+// The `map` rewrite skips occurrences immediately followed by `[`, so
+// Go map type literals such as `map[string]int{}` still produce the
+// usual "unsupported syntax" error at evaluation rather than being
+// silently turned into a meaningless call. `if` has no analogous
+// safe context inside expr expressions, so every `if` token is
+// rewritten unconditionally.
 func preprocessSource(src string) string {
-	// Fast path: most expr expressions do not contain `map` at all,
-	// so the scanner pass is skipped. `strings.Contains` on a short
-	// expression is much cheaper than spinning up go/scanner.
-	if !strings.Contains(src, "map") {
+	// Fast path: skip the scanner unless the source mentions one of
+	// the rewritable keywords. Substring checks on short inputs are
+	// much cheaper than spinning up go/scanner.
+	if !containsAnyRewriteKeyword(src) {
 		return src
 	}
 	fs := token.NewFileSet()
@@ -223,18 +243,19 @@ func preprocessSource(src string) string {
 	out.Grow(len(src) + 16)
 	last := 0
 	for i := 0; i < len(toks); i++ {
-		if toks[i].tok != token.MAP {
+		rule, ok := matchRewrite(toks[i].tok)
+		if !ok {
 			continue
 		}
 		// Leave `map[...]` alone so Go map type literals continue to
 		// produce a normal "unsupported syntax" error at eval time.
-		if i+1 < len(toks) && toks[i+1].tok == token.LBRACK {
+		if rule.tok == token.MAP && i+1 < len(toks) && toks[i+1].tok == token.LBRACK {
 			continue
 		}
 		off := file.Offset(toks[i].pos)
 		out.WriteString(src[last:off])
-		out.WriteString(mapFormName)
-		last = off + len("map")
+		out.WriteString(rule.internal)
+		last = off + len(rule.src)
 	}
 	if last == 0 {
 		return src
@@ -243,12 +264,41 @@ func preprocessSource(src string) string {
 	return out.String()
 }
 
+func containsAnyRewriteKeyword(src string) bool {
+	for _, r := range keywordRewrites {
+		if strings.Contains(src, r.src) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchRewrite(tok token.Token) (struct {
+	tok      token.Token
+	src      string
+	internal string
+}, bool) {
+	for _, r := range keywordRewrites {
+		if r.tok == tok {
+			return r, true
+		}
+	}
+	return struct {
+		tok      token.Token
+		src      string
+		internal string
+}{}, false
+}
+
 // displayIdent converts an internal rewritten identifier back to the
 // name the user originally typed, for use in error messages and
-// field/method lookups. Currently this only matters for `map`.
+// field/method lookups.
 func displayIdent(name string) string {
-	if name == mapFormName {
+	switch name {
+	case mapFormName:
 		return "map"
+	case ifFuncName:
+		return "if"
 	}
 	return name
 }

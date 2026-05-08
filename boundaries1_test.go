@@ -714,6 +714,100 @@ func TestBuiltin_Bool(t *testing.T) {
 	}
 }
 
+func TestBuiltin_If(t *testing.T) {
+	opts := []Option{WithBuiltins()}
+	cases := []struct {
+		expr string
+		env  map[string]any
+		want any
+	}{
+		{`if(true, "yes", "no")`, nil, "yes"},
+		{`if(false, "yes", "no")`, nil, "no"},
+		{`if(1, "yes", "no")`, nil, "yes"},
+		{`if(0, "yes", "no")`, nil, "no"},
+		{`if("", "yes", "no")`, nil, "no"},
+		{`if("x", "yes", "no")`, nil, "yes"},
+		{`if(nil, "yes", "no")`, nil, "no"},
+		{`if(score > 90, "A", "B")`, map[string]any{"score": 95}, "A"},
+		{`if(score > 90, "A", "B")`, map[string]any{"score": 80}, "B"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			got, err := evalExpr(t.Context(), tc.expr, tc.env, opts...)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestBuiltin_If_Arity(t *testing.T) {
+	opts := []Option{WithBuiltins()}
+	for _, expr := range []string{`if(true)`, `if(true, 1)`, `if(true, 1, 2, 3)`} {
+		_, err := evalExpr(t.Context(), expr, nil, opts...)
+		require.Error(t, err, expr)
+		require.ErrorIs(t, err, ErrEvaluate)
+	}
+}
+
+// Without WithBuiltins, `if(...)` must report a clean "unknown
+// function" error using the user-visible name, not the internal
+// rewrite sentinel.
+func TestBuiltin_If_NotRegistered(t *testing.T) {
+	_, err := evalExpr(t.Context(), `if(true, 1, 2)`, nil)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), `unknown function "if"`)
+}
+
+// `if` is eager: the unselected branch still evaluates, so a
+// runtime error there propagates. Users who need laziness reach for
+// try, &&, or ||.
+func TestBuiltin_If_EagerEvaluation(t *testing.T) {
+	opts := []Option{WithBuiltins()}
+	env := map[string]any{"xs": []any{1, 2, 3}}
+	_, err := evalExpr(t.Context(), `if(true, xs[0], xs[99])`, env, opts...)
+	require.Error(t, err)
+}
+
+// A user-registered `if` must shadow the builtin, matching the
+// shadow rules every other builtin obeys.
+func TestBuiltin_If_UserShadows(t *testing.T) {
+	opts := []Option{
+		WithBuiltins(),
+		WithFunctions(map[string]any{
+			"if": Func(func(_ context.Context, _ []any) (any, error) {
+				return "shadow", nil
+			}),
+		}),
+	}
+	got, err := evalExpr(t.Context(), `if(true, 1, 2)`, nil, opts...)
+	require.NoError(t, err)
+	require.Equal(t, "shadow", got)
+}
+
+// An env entry named `if` must shadow the builtin, matching the
+// env-wins-over-funcs rule.
+func TestBuiltin_If_EnvShadows(t *testing.T) {
+	opts := []Option{WithBuiltins()}
+	env := map[string]any{
+		"if": Func(func(_ context.Context, _ []any) (any, error) {
+			return "envshadow", nil
+		}),
+	}
+	got, err := evalExpr(t.Context(), `if(true, 1, 2)`, env, opts...)
+	require.NoError(t, err)
+	require.Equal(t, "envshadow", got)
+}
+
+// `if` must be usable inside higher-order predicates and templates;
+// nothing about the keyword rewrite should break composition.
+func TestBuiltin_If_InsidePredicate(t *testing.T) {
+	opts := []Option{WithBuiltins()}
+	env := map[string]any{"xs": []any{int64(1), int64(2), int64(3), int64(4)}}
+	got, err := evalExpr(t.Context(), `map(xs, if(it > 2, "big", "small"))`, env, opts...)
+	require.NoError(t, err)
+	require.Equal(t, []any{"small", "small", "big", "big"}, got)
+}
+
 func TestBuiltin_Contains_Nil(t *testing.T) {
 	opts := []Option{WithBuiltins()}
 	got, err := evalExpr(t.Context(), "contains(nil, 1)", nil, opts...)

@@ -100,6 +100,7 @@ registered yourself. This keeps the sandbox surface as narrow as you want.
 | `int(v)`          | `(any) -> int64`               | Truncates floats; strict base-10 parse for strings        |
 | `float(v)`        | `(any) -> float64`             | `strconv.ParseFloat` 64-bit for strings                   |
 | `bool(v)`         | `(any) -> bool`                | Same rules as truthiness                                  |
+| `if(c, t, f)`     | `(any, any, any) -> any`       | Eager ternary; `t` and `f` both evaluate before the call  |
 | `contains(h, n)`  | `(any, any) -> bool`           | Substring, element, or map-key presence                   |
 | `has(m, k)`       | `(any, string) -> bool`        | Key presence on a map (nil → false)                       |
 | `keys(m)`         | `(any) -> []any`               | Sorted string keys                                         |

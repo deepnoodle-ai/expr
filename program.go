@@ -149,9 +149,12 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 		// Only cache bare-identifier call targets that resolve to a
 		// registered, prepared function AND are not higher-order
 		// special forms. The form dispatcher needs the raw CallExpr.
+		// Keyword sentinels (`__expr_if__`, etc.) are translated back
+		// to their user-visible names so the prepared lookup keys on
+		// what the user actually wrote.
 		if ident, ok := n.Fun.(*ast.Ident); ok {
-			name := ident.Name
-			if _, isForm := higherOrderForms[name]; !isForm && name != mapFormName {
+			if _, isForm := higherOrderForms[ident.Name]; !isForm {
+				name := displayIdent(ident.Name)
 				if pf, ok := p.prepared[name]; ok && (pf.native != nil || pf.fv.IsValid()) {
 					p.callCache[n] = pf
 				}
@@ -384,17 +387,20 @@ func evalIdent(n *ast.Ident, env any, funcs map[string]any, fieldTags *structTag
 	case "nil":
 		return nil, nil
 	}
-	if v, ok, err := lookupEnv(env, n.Name, fieldTags); err != nil {
+	// Keyword sentinels (`__expr_if__`, ...) lookup under their
+	// user-visible name so env entries and registered functions
+	// match what the user actually wrote.
+	name := displayIdent(n.Name)
+	if v, ok, err := lookupEnv(env, name, fieldTags); err != nil {
 		return nil, err
 	} else if ok {
 		return v, nil
 	}
-	if fn, ok := funcs[n.Name]; ok {
+	if fn, ok := funcs[name]; ok {
 		return fn, nil
 	}
-	user := displayIdent(n.Name)
 	return nil, fmt.Errorf("%w: undefined identifier %q%s",
-		ErrEvaluate, user, identHint(env, funcs, user, fieldTags))
+		ErrEvaluate, name, identHint(env, funcs, name, fieldTags))
 }
 
 // lookupEnv resolves a top-level identifier against env. env may be a
@@ -1139,16 +1145,20 @@ func (p *Program) callValue(ctx context.Context, name string, fn any, argExprs [
 func (p *Program) resolveCallable(ctx context.Context, fun ast.Expr, env any, depth int) (string, any, error) {
 	switch f := fun.(type) {
 	case *ast.Ident:
-		if v, ok, err := lookupEnv(env, f.Name, p.fieldTags); err != nil {
+		// Translate keyword sentinels (`__expr_if__`, ...) back to
+		// the user-visible name so env/funcs lookups and the error
+		// message both see what the user wrote.
+		name := displayIdent(f.Name)
+		if v, ok, err := lookupEnv(env, name, p.fieldTags); err != nil {
 			return "", nil, err
 		} else if ok {
-			return f.Name, v, nil
+			return name, v, nil
 		}
-		if v, ok := p.funcs[f.Name]; ok {
-			return f.Name, v, nil
+		if v, ok := p.funcs[name]; ok {
+			return name, v, nil
 		}
 		return "", nil, fmt.Errorf("%w: unknown function %q%s",
-			ErrEvaluate, f.Name, identHint(env, p.funcs, f.Name, p.fieldTags))
+			ErrEvaluate, name, identHint(env, p.funcs, name, p.fieldTags))
 	case *ast.SelectorExpr:
 		recv, err := p.eval(ctx, f.X, env, depth)
 		if err != nil {
