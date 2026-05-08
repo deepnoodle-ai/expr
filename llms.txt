@@ -123,6 +123,20 @@ you need to).
 | `all(list, pred)`     | `bool`           | True if all match (empty list → true, short-circuits) |
 | `find(list, pred)`    | element or `nil` | First match or nil                                    |
 | `count(list, pred)`   | `int64`          | Number of matches                                     |
+| `try(value, default)` | value or default | `value` if it evaluates cleanly, else `default`       |
+
+`try` is the odd one out: it does not iterate a list, binds no `it`
+or `index`, and traps anything wrapping `ErrEvaluate` (missing keys,
+nil selectors, out-of-range indices, `int`/`float` parse failures).
+The `default` expression is lazy: it runs only when the primary fails.
+`try` does **not** trap raw `context.Canceled`,
+`context.DeadlineExceeded`, or anything wrapping `ErrCompile`.
+
+```
+try(int(s), 0)                                      // parse with fallback
+try(find(events, it.kind == "purchase").user, "—")  // optional chain
+try(user.nickname, nil) || "(none)"                 // present nil
+```
 
 Names can be shadowed by `WithFunctions` or an env entry of the same
 name. The literal token `map` is rewritten to an internal sentinel

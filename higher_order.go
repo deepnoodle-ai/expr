@@ -2,6 +2,7 @@ package expr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"reflect"
@@ -48,13 +49,14 @@ func init() {
 		"all":       formAll,
 		"find":      formFind,
 		"count":     formCount,
+		"try":       formTry,
 	}
 }
 
 // higherOrderNames is the user-visible list of special-form builtins.
 // It drives "did you mean" hints so users see the spelling they would
 // actually type (`map`, not the internal rewritten name).
-var higherOrderNames = []string{"map", "filter", "any", "all", "find", "count"}
+var higherOrderNames = []string{"map", "filter", "any", "all", "find", "count", "try"}
 
 // iterItems evaluates collExpr and converts the result to a []any for
 // predicate iteration. nil is treated as an empty list so
@@ -254,4 +256,30 @@ func formCount(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth 
 		return nil, err
 	}
 	return total, nil
+}
+
+// formTry implements `try(value, default)`. It evaluates the first
+// argument; if evaluation returns an ErrEvaluate, it evaluates and
+// returns the second argument instead. The default expression is
+// only evaluated when the primary expression failed, so users can
+// safely supply expensive or side-effecting fallbacks.
+//
+// Context cancellation (context.Canceled / context.DeadlineExceeded)
+// is propagated unwrapped. Anything wrapping ErrCompile is also
+// propagated; expr should not normally surface compile errors at
+// Run time, but if it does they signal a programmer mistake that
+// try is not the right place to swallow.
+func formTry(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	if len(n.Args) != 2 {
+		return nil, fmt.Errorf("%w: try expects 2 arguments (value, default), got %d",
+			ErrEvaluate, len(n.Args))
+	}
+	v, err := p.eval(ctx, n.Args[0], env, depth)
+	if err == nil {
+		return v, nil
+	}
+	if !errors.Is(err, ErrEvaluate) || errors.Is(err, ErrCompile) {
+		return nil, err
+	}
+	return p.eval(ctx, n.Args[1], env, depth)
 }

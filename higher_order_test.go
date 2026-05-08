@@ -205,3 +205,141 @@ func TestHigherOrder_CancelDuringIteration(t *testing.T) {
 	require.True(t, errors.Is(err, context.Canceled),
 		"expected context.Canceled, got %v", err)
 }
+
+// --- try special form ---
+
+func TestTry_ValueSucceeds(t *testing.T) {
+	// When the first argument evaluates without error, the default is
+	// not consulted at all and the success value is returned verbatim.
+	got, err := evalExpr(t.Context(), `try(42, 0)`, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), got)
+
+	env := map[string]any{"user": map[string]any{"name": "Ada"}}
+	got, err = evalExpr(t.Context(), `try(user.name, "anon")`, env)
+	require.NoError(t, err)
+	require.Equal(t, "Ada", got)
+}
+
+func TestTry_DefaultOnMissingKey(t *testing.T) {
+	// Missing-key access raises ErrEvaluate. try traps that and returns
+	// the default. The default expression itself can be any expression,
+	// including one referring to other env values.
+	env := map[string]any{"user": map[string]any{"name": "Ada"}}
+	got, err := evalExpr(t.Context(), `try(user.nickname, "—")`, env)
+	require.NoError(t, err)
+	require.Equal(t, "—", got)
+
+	got, err = evalExpr(t.Context(), `try(missing.path, user.name)`, env)
+	require.NoError(t, err)
+	require.Equal(t, "Ada", got)
+}
+
+func TestTry_DefaultOnTypeError(t *testing.T) {
+	// try also catches type errors, which is one of the points: cheap
+	// `try(int(s), 0)` for strings that may or may not parse.
+	opts := []Option{WithBuiltins()}
+	got, err := evalExpr(t.Context(), `try(int("not-a-number"), 0)`, nil, opts...)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), got)
+
+	got, err = evalExpr(t.Context(), `try(int("42"), 0)`, nil, opts...)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), got)
+}
+
+func TestTry_DefaultOnIndexOutOfRange(t *testing.T) {
+	env := map[string]any{"xs": []any{int64(1), int64(2)}}
+	got, err := evalExpr(t.Context(), `try(xs[10], -1)`, env)
+	require.NoError(t, err)
+	require.Equal(t, int64(-1), got)
+}
+
+func TestTry_DefaultIsLazy(t *testing.T) {
+	// The default expression is only evaluated when the primary fails.
+	// Pin that with a function that panics if called.
+	opts := []Option{WithFunctions(map[string]any{
+		"boom": func() int { panic("default should not have been evaluated") },
+	})}
+	got, err := evalExpr(t.Context(), `try(42, boom())`, nil, opts...)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), got)
+}
+
+func TestTry_DefaultErrorPropagates(t *testing.T) {
+	// If the default expression itself errors, that error surfaces.
+	// try is not a blanket exception swallower; it traps the primary
+	// arg only.
+	env := map[string]any{"user": map[string]any{"name": "Ada"}}
+	_, err := evalExpr(t.Context(), `try(missing.path, also.missing)`, env)
+	require.ErrorIs(t, err, ErrEvaluate)
+}
+
+func TestTry_ArityError(t *testing.T) {
+	_, err := evalExpr(t.Context(), `try(1)`, nil)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "try expects 2 arguments")
+
+	_, err = evalExpr(t.Context(), `try(1, 2, 3)`, nil)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "try expects 2 arguments")
+}
+
+func TestTry_DoesNotTrapContextCancellation(t *testing.T) {
+	// A canceled context should propagate as context.Canceled even
+	// though try would otherwise be tempted to swallow the error. The
+	// raw context error must reach the caller so timeouts and explicit
+	// cancellation are observable.
+	ctxC, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := evalExpr(ctxC, `try(user.name, "fallback")`, map[string]any{
+		"user": map[string]any{"name": "Ada"},
+	})
+	require.True(t, errors.Is(err, context.Canceled),
+		"expected context.Canceled to propagate, got %v", err)
+}
+
+func TestTry_UserFuncOverride(t *testing.T) {
+	// A registered try function shadows the special form, matching the
+	// env→funcs resolution order used by every other higher-order form.
+	opts := []Option{WithFunctions(map[string]any{
+		"try": func(a, b int64) int64 { return a + b },
+	})}
+	got, err := evalExpr(t.Context(), `try(2, 3)`, nil, opts...)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), got)
+}
+
+func TestTry_EnvShadowsForm(t *testing.T) {
+	// An env entry named try shadows the form too (so `try` resolves to
+	// the env value). This pins the consistent shadowing semantics; it
+	// is not a recommended pattern.
+	got, err := evalExpr(t.Context(), `try`, map[string]any{"try": int64(7)})
+	require.NoError(t, err)
+	require.Equal(t, int64(7), got)
+}
+
+func TestTry_NestedComposition(t *testing.T) {
+	// try composes inside higher-order forms. find returns nil when no
+	// element matches; selecting .name on nil errors; try falls back.
+	env := map[string]any{
+		"events": []any{
+			map[string]any{"kind": "click"},
+			map[string]any{"kind": "view"},
+		},
+	}
+	got, err := evalExpr(t.Context(),
+		`try(find(events, it.kind == "purchase").user, "—")`, env)
+	require.NoError(t, err)
+	require.Equal(t, "—", got)
+}
+
+func TestTry_ComposesWithLogicalOr(t *testing.T) {
+	// try plus operand-returning || covers the common "fall back to a
+	// default and present nil as something else" case.
+	env := map[string]any{"user": map[string]any{}}
+	got, err := evalExpr(t.Context(),
+		`try(user.nickname, nil) || "(none)"`, env)
+	require.NoError(t, err)
+	require.Equal(t, "(none)", got)
+}
