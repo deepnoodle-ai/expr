@@ -54,6 +54,11 @@ func init() {
 		"find":      formFind,
 		"count":     formCount,
 		"try":       formTry,
+		// Sentinel forms emitted by the optaccess pre-parse rewrite.
+		// Users do not type these names; they appear only as the
+		// callee of synthesized CallExpr nodes.
+		trySelectFormName: formTrySelect,
+		tryIndexFormName:  formTryIndex,
 	}
 }
 
@@ -306,6 +311,170 @@ func formCount(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth 
 		return nil, err
 	}
 	return total, nil
+}
+
+// formTrySelect implements the optaccess `?.` rewrite target,
+// `__try_select__(receiver, "field")`. It evaluates the receiver;
+// when the receiver is nil, returns nil. Otherwise it performs a
+// field/key lookup via trySelectName, which returns nil for missing
+// fields or keys without producing an error. Type errors (e.g.,
+// selecting on a non-struct, non-map value) propagate so real bugs
+// still surface.
+func formTrySelect(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	if len(n.Args) != 2 {
+		return nil, fmt.Errorf("%w: %s expects 2 arguments (receiver, field), got %d",
+			ErrEvaluate, trySelectFormName, len(n.Args))
+	}
+	recv, err := p.eval(ctx, n.Args[0], env, depth)
+	if err != nil {
+		return nil, err
+	}
+	if recv == nil {
+		return nil, nil
+	}
+	name, err := p.eval(ctx, n.Args[1], env, depth)
+	if err != nil {
+		return nil, err
+	}
+	s, ok := name.(string)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s expects a string field name, got %T",
+			ErrEvaluate, trySelectFormName, name)
+	}
+	return trySelectName(recv, s, p.fieldTags)
+}
+
+// formTryIndex implements the optaccess `?[` rewrite target,
+// `__try_index__(receiver, idx)`. Mirrors formTrySelect: nil
+// receiver returns nil, missing keys and out-of-range indices return
+// nil, and type errors (wrong index kind for the receiver) propagate.
+func formTryIndex(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	if len(n.Args) != 2 {
+		return nil, fmt.Errorf("%w: %s expects 2 arguments (receiver, index), got %d",
+			ErrEvaluate, tryIndexFormName, len(n.Args))
+	}
+	recv, err := p.eval(ctx, n.Args[0], env, depth)
+	if err != nil {
+		return nil, err
+	}
+	if recv == nil {
+		return nil, nil
+	}
+	idx, err := p.eval(ctx, n.Args[1], env, depth)
+	if err != nil {
+		return nil, err
+	}
+	return tryIndexValue(recv, idx)
+}
+
+// trySelectName mirrors selectField but returns nil for missing
+// fields or keys. Method values are not surfaced; selectField does
+// not surface them either, so the two paths agree on what counts as
+// a "field" lookup.
+func trySelectName(recv any, name string, fieldTags *structTagConfig) (any, error) {
+	if recv == nil {
+		return nil, nil
+	}
+	if m, ok := recv.(map[string]any); ok {
+		v := m[name]
+		return v, nil
+	}
+	rv := reflect.ValueOf(recv)
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil, nil
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.Struct:
+		fv, ok, err := structFieldByName(rv, name, fieldTags)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !fv.IsValid() || !fv.CanInterface() {
+			return nil, nil
+		}
+		return fv.Interface(), nil
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("%w: cannot select %q on map with non-string keys",
+				ErrEvaluate, name)
+		}
+		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
+		if !mv.IsValid() {
+			return nil, nil
+		}
+		return mv.Interface(), nil
+	}
+	return nil, fmt.Errorf("%w: cannot select %q on %T", ErrEvaluate, name, recv)
+}
+
+// tryIndexValue mirrors indexValue but returns nil for missing
+// keys and out-of-range slice/string indices. Wrong-kind errors
+// (e.g., string index into a slice, non-integer slice index) still
+// propagate.
+func tryIndexValue(recv, idx any) (any, error) {
+	if recv == nil {
+		return nil, nil
+	}
+	if m, ok := recv.(map[string]any); ok {
+		key, ok := idx.(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: map index must be string, got %T",
+				ErrEvaluate, idx)
+		}
+		v := m[key]
+		return v, nil
+	}
+	rv := reflect.ValueOf(recv)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		i, err := toIndexInt(idx)
+		if err != nil {
+			return nil, err
+		}
+		if i < 0 || i >= int64(rv.Len()) {
+			return nil, nil
+		}
+		return rv.Index(int(i)).Interface(), nil
+	case reflect.String:
+		i, err := toIndexInt(idx)
+		if err != nil {
+			return nil, err
+		}
+		runes := []rune(rv.String())
+		if i < 0 || i >= int64(len(runes)) {
+			return nil, nil
+		}
+		return string(runes[i]), nil
+	case reflect.Map:
+		keyType := rv.Type().Key()
+		if idx == nil {
+			return nil, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
+		}
+		kv := reflect.ValueOf(idx)
+		if !kv.Type().AssignableTo(keyType) {
+			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
+				converted, err := safeNumericConvert(kv, keyType)
+				if err != nil {
+					return nil, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
+				}
+				kv = converted
+			} else if kv.Type().ConvertibleTo(keyType) {
+				kv = kv.Convert(keyType)
+			} else {
+				return nil, fmt.Errorf("%w: cannot use %T as map key %v",
+					ErrEvaluate, idx, keyType)
+			}
+		}
+		mv := rv.MapIndex(kv)
+		if !mv.IsValid() {
+			return nil, nil
+		}
+		return mv.Interface(), nil
+	}
+	return nil, fmt.Errorf("%w: cannot index %T", ErrEvaluate, recv)
 }
 
 // formTry implements `try(value, default)`. It evaluates the first

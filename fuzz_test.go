@@ -68,6 +68,17 @@ var fuzzCorpus = []string{
 	"1 ^ 2",
 	"1i",
 	"",
+	// optional access (`?.` / `?[`)
+	"state.user?.nickname",
+	"state.user?.profile?.nickname",
+	"state.items?[0]",
+	"state.items?[99]",
+	"state.user?.nickname || \"(none)\"",
+	`"contains?.field"`,
+	"state /* ?.x */ .name",
+	"?.x",
+	"a?.",
+	"a?[",
 }
 
 // fuzzEnv is the environment FuzzEval runs every mutated expression
