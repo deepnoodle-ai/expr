@@ -218,12 +218,14 @@ limited by [evaluation depth](#limits-and-safety).
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
 - Other maps: `i` is converted to the map's key type if assignable or
   convertible. A nil index on a typed map is an error (not a panic).
-- Slice, array: `i` must be an integer. Negative indices and indices
-  `>= len(x)` return `ErrEvaluate` (expr does not support Python-style
-  negative indexing).
+- Slice, array: `i` must be an integer or an integer-valued float
+  (`xs[1.0]` works, `xs[1.5]` is an error). Negative indices and
+  indices `>= len(x)` return `ErrEvaluate` (expr does not support
+  Python-style negative indexing).
 - String: `i` selects the `i`-th **rune** (Unicode code point) and
   returns it as a one-rune string. `len(s)` is also in runes, so indexing
-  and length stay consistent for non-ASCII strings.
+  and length stay consistent for non-ASCII strings. Integer-valued
+  floats are accepted here as well.
 - Anything else → `ErrEvaluate`.
 
 Slice expressions (`x[a:b]`), full slices (`x[a:b:c]`), and type
