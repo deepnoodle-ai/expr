@@ -30,7 +30,7 @@ import (
 //	has(m, k)         true if map m has key k; errors if m is not a map
 //	keys(m)           sorted string keys of a map
 //	lower(s), upper(s)  case conversion
-//	sprintf(fmt, ...) fmt.Sprintf passthrough
+//	sprintf(fmt, ...) fmt.Sprintf-style formatting with cycle guards
 func Builtins() map[string]any {
 	return map[string]any{
 		"len":      Func(nativeLen),
@@ -43,7 +43,7 @@ func Builtins() map[string]any {
 		"keys":     Func(nativeKeys),
 		"lower":    Func(nativeLower),
 		"upper":    Func(nativeUpper),
-		"sprintf":  fmt.Sprintf,
+		"sprintf":  Func(nativeSprintf),
 	}
 }
 
@@ -115,7 +115,7 @@ func nativeLower(_ context.Context, args []any) (any, error) {
 	if err := checkArity("lower", 1, len(args)); err != nil {
 		return nil, err
 	}
-	s, ok := args[0].(string)
+	s, ok := asString(args[0])
 	if !ok {
 		return nil, fmt.Errorf("%w: lower: expected string, got %T", ErrEvaluate, args[0])
 	}
@@ -126,11 +126,26 @@ func nativeUpper(_ context.Context, args []any) (any, error) {
 	if err := checkArity("upper", 1, len(args)); err != nil {
 		return nil, err
 	}
-	s, ok := args[0].(string)
+	s, ok := asString(args[0])
 	if !ok {
 		return nil, fmt.Errorf("%w: upper: expected string, got %T", ErrEvaluate, args[0])
 	}
 	return strings.ToUpper(s), nil
+}
+
+func nativeSprintf(_ context.Context, args []any) (any, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("%w: sprintf expects at least 1 arg, got 0", ErrEvaluate)
+	}
+	format, ok := asString(args[0])
+	if !ok {
+		return nil, fmt.Errorf("%w: sprintf: format must be string, got %T", ErrEvaluate, args[0])
+	}
+	wrapped := make([]any, len(args)-1)
+	for i, arg := range args[1:] {
+		wrapped[i] = safeFormatArg{v: arg}
+	}
+	return fmt.Sprintf(format, wrapped...), nil
 }
 
 func builtinLen(v any) (int, error) {
@@ -157,7 +172,7 @@ func builtinString(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	return fmt.Sprintf("%v", v)
+	return safeFormatValue(v)
 }
 
 func builtinInt(v any) (int64, error) {
@@ -168,9 +183,13 @@ func builtinInt(v any) (int64, error) {
 		return i, nil
 	}
 	if f, ok := toFloat64(v); ok {
-		return int64(f), nil
+		i, err := truncFloatToInt64(f, "int")
+		if err != nil {
+			return 0, fmt.Errorf("%w: int: %v", ErrEvaluate, err)
+		}
+		return i, nil
 	}
-	if s, ok := v.(string); ok {
+	if s, ok := asString(v); ok {
 		i, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("%w: int: cannot parse %q", ErrEvaluate, s)
@@ -187,7 +206,7 @@ func builtinFloat(v any) (float64, error) {
 	if f, ok := toFloat64(v); ok {
 		return f, nil
 	}
-	if s, ok := v.(string); ok {
+	if s, ok := asString(v); ok {
 		f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 		if err != nil {
 			return 0, fmt.Errorf("%w: float: cannot parse %q", ErrEvaluate, s)
@@ -201,8 +220,8 @@ func builtinContains(haystack, needle any) (bool, error) {
 	if haystack == nil {
 		return false, nil
 	}
-	if s, ok := haystack.(string); ok {
-		sub, ok := needle.(string)
+	if s, ok := asString(haystack); ok {
+		sub, ok := asString(needle)
 		if !ok {
 			return false, fmt.Errorf("%w: contains: needle must be string for string haystack, got %T", ErrEvaluate, needle)
 		}
@@ -222,11 +241,11 @@ func builtinContains(haystack, needle any) (bool, error) {
 		if rv.Type().Key().Kind() != reflect.String {
 			return false, fmt.Errorf("%w: contains: map key must be string", ErrEvaluate)
 		}
-		key, ok := needle.(string)
+		key, ok := asString(needle)
 		if !ok {
 			return false, fmt.Errorf("%w: contains: map lookup needs string needle, got %T", ErrEvaluate, needle)
 		}
-		return rv.MapIndex(reflect.ValueOf(key)).IsValid(), nil
+		return rv.MapIndex(mapStringKey(rv.Type().Key(), key)).IsValid(), nil
 	}
 	return false, fmt.Errorf("%w: contains: unsupported haystack type %T", ErrEvaluate, haystack)
 }
@@ -242,11 +261,25 @@ func builtinHas(m, key any) (bool, error) {
 	if rv.Type().Key().Kind() != reflect.String {
 		return false, fmt.Errorf("%w: has: map key must be string", ErrEvaluate)
 	}
-	k, ok := key.(string)
+	k, ok := asString(key)
 	if !ok {
 		return false, fmt.Errorf("%w: has: key must be string, got %T", ErrEvaluate, key)
 	}
-	return rv.MapIndex(reflect.ValueOf(k)).IsValid(), nil
+	return rv.MapIndex(mapStringKey(rv.Type().Key(), k)).IsValid(), nil
+}
+
+func asString(v any) (string, bool) {
+	if v == nil {
+		return "", false
+	}
+	if s, ok := v.(string); ok {
+		return s, true
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.String {
+		return rv.String(), true
+	}
+	return "", false
 }
 
 func builtinKeys(m any) ([]any, error) {

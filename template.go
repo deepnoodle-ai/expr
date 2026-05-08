@@ -112,7 +112,7 @@ func formatTemplateValue(v any) string {
 	case string:
 		return x
 	default:
-		return fmt.Sprintf("%v", v)
+		return safeFormatValue(v)
 	}
 }
 
