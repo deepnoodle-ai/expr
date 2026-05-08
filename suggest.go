@@ -32,24 +32,12 @@ func identHint(env any, funcs map[string]any, name string, fieldTags *structTagC
 // matches the form's actual arity so users see the correct shape
 // (`try(value, default)` vs `count(xs, predicate)`).
 func specialFormHint(name string) (string, bool) {
-	sig, ok := formCallHints[name]
-	if !ok {
-		return "", false
+	for _, f := range userForms {
+		if f.name == name {
+			return fmt.Sprintf(" (%q is a special form, did you mean to call %s?)", name, f.callHint), true
+		}
 	}
-	return fmt.Sprintf(" (%q is a special form, did you mean to call %s?)", name, sig), true
-}
-
-// formCallHints maps each higher-order form to its call signature for
-// use in "is a special form" hints. Kept in lockstep with
-// higherOrderForms in higher_order.go.
-var formCallHints = map[string]string{
-	"map":    "map(xs, predicate)",
-	"filter": "filter(xs, predicate)",
-	"any":    "any(xs, predicate)",
-	"all":    "all(xs, predicate)",
-	"find":   "find(xs, predicate)",
-	"count":  "count(xs, predicate)",
-	"try":    "try(value, default)",
+	return "", false
 }
 
 // fieldHint is identHint's counterpart for selector and index
@@ -178,7 +166,9 @@ func availableIdents(env any, funcs map[string]any, fieldTags *structTagConfig) 
 	}
 	// Include the higher-order special forms under their user-visible
 	// names so a typo of `map` or `filter` suggests the right thing.
-	names = append(names, higherOrderNames...)
+	for _, f := range userForms {
+		names = append(names, f.name)
+	}
 	return names
 }
 
