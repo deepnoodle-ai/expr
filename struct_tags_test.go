@@ -114,13 +114,13 @@ func TestStructTags_NestedPointersAndEmbeddedStructs(t *testing.T) {
 
 func TestStructTags_AmbiguousFieldAccessErrors(t *testing.T) {
 	type conflict struct {
-		Foo string `json:"value"`
-		Bar string `json:"value"`
+		Foo string `exprtest:"value"`
+		Bar string `exprtest:"value"`
 	}
 
 	_, err := evalExpr(t.Context(), `x.value`, map[string]any{
 		"x": conflict{Foo: "a", Bar: "b"},
-	}, WithStructTags("json"))
+	}, WithStructTags("exprtest"))
 	require.ErrorIs(t, err, ErrEvaluate)
 	require.Contains(t, err.Error(), `field "value" is ambiguous`)
 }
@@ -144,11 +144,11 @@ func TestStructTags_CallableFieldAndSuggestions(t *testing.T) {
 
 func TestStructTags_AmbiguityStillWrapsErrEvaluate(t *testing.T) {
 	type conflict struct {
-		Foo string `json:"value"`
-		Bar string `json:"value"`
+		Foo string `exprtest:"value"`
+		Bar string `exprtest:"value"`
 	}
 
-	p, err := Compile(`value`, WithStructTags("json"))
+	p, err := Compile(`value`, WithStructTags("exprtest"))
 	require.NoError(t, err)
 	_, err = p.Run(t.Context(), conflict{Foo: "a", Bar: "b"})
 	if !errors.Is(err, ErrEvaluate) {
