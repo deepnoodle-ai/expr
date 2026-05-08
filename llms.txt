@@ -142,15 +142,32 @@ The `default` expression is lazy: it runs only when the primary fails.
 `context.DeadlineExceeded`, or anything wrapping `ErrCompile`.
 
 ```
-try(int(s), 0)                                      // parse with fallback
-try(find(events, it.kind == "purchase").user, "—")  // optional chain
-try(user.nickname, nil) || "(none)"                 // present nil
+try(int(s), 0)                                       // parse with fallback
+try(find(events, it.kind == "purchase")?.user, "—")  // optional chain
+try(user.nickname, nil) || "(none)"                  // present nil
 ```
 
 Names can be shadowed by `WithFunctions` or an env entry of the same
 name. The literal token `map` is rewritten to an internal sentinel
 before parsing (Go treats `map` as a keyword), then translated back for
 error messages.
+
+## Optional access (`?.` and `?[`)
+
+`obj?.field` and `obj?[idx]` are pre-parse rewrites that turn a
+"missing-key" or "out-of-range" lookup into `nil` instead of an
+error. nil receivers also resolve to nil. Wrong-kind type errors
+(selecting on a non-struct, indexing with a non-integer, ...) still
+surface, so real bugs are not hidden.
+
+```
+user?.profile?.nickname || "(none)"
+events?[0]?.user
+config?.feature?.enabled
+```
+
+The rewrite is token-level and skips strings, runes, and comments,
+so `"obj?.field"` and `// obj?.field` survive untouched.
 
 ## Custom functions
 

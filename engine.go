@@ -41,6 +41,7 @@ import (
 	"strings"
 
 	"github.com/deepnoodle-ai/expr/internal/jsonlit"
+	"github.com/deepnoodle-ai/expr/internal/optaccess"
 )
 
 // ErrCompile wraps parse failures so callers can match with errors.Is.
@@ -151,7 +152,12 @@ func Compile(code string, opts ...Option) (*Program, error) {
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	parsed := preprocessSource(jsonlit.Rewrite(code))
+	// Pipeline order: optaccess turns `?.`/`?[` into sentinel calls
+	// while the source still uses raw operator syntax; jsonlit then
+	// rewrites bare composite literals; preprocessSource handles the
+	// keyword rewrites (`map`) so the parser accepts them as
+	// identifiers.
+	parsed := preprocessSource(jsonlit.Rewrite(optaccess.Rewrite(code)))
 	fset := token.NewFileSet()
 	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
@@ -186,6 +192,18 @@ const mapFormName = "__expr_map__"
 // callable as `if(cond, t, f)` while keeping the user-visible name
 // in error messages and method lookups.
 const ifFuncName = "__expr_if__"
+
+// trySelectFormName and tryIndexFormName are the internal sentinel
+// identifiers emitted by the optaccess pre-parse rewrite for the
+// optional-access operators `?.` and `?[`. The evaluator dispatches
+// them as special forms in higherOrderForms so they can short-circuit
+// on a nil receiver and treat missing fields / out-of-range indices
+// as nil rather than as errors. Users never type these names
+// directly.
+const (
+	trySelectFormName = "__try_select__"
+	tryIndexFormName  = "__try_index__"
+)
 
 // keywordRewrites lists the Go keyword tokens that expr accepts as
 // ordinary identifiers. Each entry maps the source spelling to its

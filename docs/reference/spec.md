@@ -394,7 +394,7 @@ expression itself surface unchanged. Combine with operand-returning
 `||` for the common case of presenting `nil` as a sentinel:
 
 ```
-try(find(events, it.kind == "purchase").user, "—")
+try(find(events, it.kind == "purchase")?.user, "—")
 try(int(input), 0) > 0
 try(user.nickname, nil) || "(none)"
 ```
@@ -407,6 +407,41 @@ special because Go's parser reserves it: expr rewrites `map` to an
 internal token before parsing so the form can still be called as
 `map(xs, it * 2)`, and translates it back for error messages and
 method lookups.
+
+## Optional access (`?.` and `?[`)
+
+`?.field` and `?[idx]` are pre-parse rewrites for "look this up, but
+return `nil` if the receiver is missing or the lookup falls off the
+end." They cover the common case where a JSON-shaped env may or may
+not include a particular branch, without forcing the user to wrap
+every access in `try(...)`.
+
+```
+user?.profile?.nickname || "(none)"
+events?[0]?.user
+config?.feature?.enabled
+```
+
+The semantics:
+
+- If the receiver is `nil`, the result is `nil` and the right-hand
+  side is not consulted.
+- For `?.`, a missing struct field or absent map key resolves to
+  `nil`.
+- For `?[`, a missing map key or an out-of-range slice/string index
+  resolves to `nil`.
+- A wrong-kind error (selecting on a value that is not a struct or
+  map, indexing a slice with a non-integer, indexing into a map with
+  the wrong key type) still surfaces as `ErrEvaluate`. `?.` and `?[`
+  swallow "not there" errors, not "real bugs."
+
+`?.` and `?[` are pure source-level sugar. The rewrite happens
+before the parser sees the source, so they behave like calls on
+internal sentinel functions (`__try_select__` and `__try_index__`).
+Users do not interact with those names directly, but they may
+appear in error chains for diagnostic purposes. Strings, runes, and
+comments are not rewritten — `?.` written inside `"..."` or a
+comment is preserved verbatim.
 
 ## Helpful errors
 

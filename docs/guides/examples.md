@@ -185,7 +185,7 @@ composite literal.
     "views":     count(events, it.kind == "view"),
     "purchases": count(events, it.kind == "purchase"),
     "has_sale":  any(events, it.kind == "purchase"),
-    "top_user":  find(events, it.kind == "purchase").user,
+    "top_user":  find(events, it.kind == "purchase")?.user,
 }
 ```
 
