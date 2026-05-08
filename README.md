@@ -16,7 +16,53 @@ like JSON-style object and array literals.
 go get github.com/deepnoodle-ai/expr
 ```
 
-## A taste
+## Expressions
+
+If you can read Go, you can read most `expr`. The inputs are plain values from
+your host program; expressions select fields, call the functions you expose,
+and produce a value.
+
+```go
+// Boolean conditions over maps, structs, or JSON-shaped data.
+user.age >= 18 && contains(user.roles, "admin")
+
+// Select fields, index lists, and call only the functions your app registers.
+sprintf("%s <%s>", user.name, lower(user.emails[0]))
+
+// JSON-style arrays and objects are expression values too.
+{
+    "ok":            user.age >= 18,
+    "display_name":  upper(user.name),
+    "public_roles":  filter(user.roles, it != "internal"),
+    "primary_email": user.emails[0],
+}
+
+// Higher-order forms bind `it` and `index` for each element.
+any(orders, it.status == "paid" && count(it.items, it.price >= 100) > 0)
+```
+
+Every snippet above is still a single expression: no statements, no mutation,
+no loops, no function definitions. Your Go code decides which data and
+functions are visible.
+
+## Templates
+
+Templates use the same expressions inside `${...}`. Each expression is compiled
+once at construction time. It is evaluated again on every `Render`.
+
+```go
+tmpl, err := expr.NewTemplate(
+    `Hello ${user.name}! You have ${len(filter(tasks, !it.done))} task(s).`,
+    expr.WithBuiltins(),
+)
+out, err := tmpl.Render(ctx, env)
+```
+
+The text outside `${...}` is just text. The expression inside can use the same
+selectors, functions, literals, and higher-order forms as any other compiled
+expression.
+
+## Using the Go API
 
 ```go
 p, err := expr.Compile(
@@ -40,7 +86,7 @@ fmt.Println(ok) // true
 ```
 
 `Compile` does the parsing work once. The returned `*Program` is immutable and
-safe to share between goroutines — compile at startup, run per request.
+safe to share between goroutines. Compile at startup. Run per request.
 
 No functions are registered by default, so the surface area is exactly as wide
 as you want it. `WithBuiltins()` opts you into a small standard set (`len`,
@@ -61,7 +107,7 @@ make sense for your sandbox.
 ## What the environment can be
 
 Whatever you pass to `Run` is what the expression sees. A `map[string]any`
-works. So does a struct, or a pointer to one — exported fields and zero-arg
+works. So does a struct, or a pointer to one. Exported fields and zero-arg
 methods both become identifiers inside the expression.
 
 ```go
@@ -91,22 +137,6 @@ Under the hood, bare `[...]` becomes `[]any{...}` and `{"k": v}` becomes
 `map[string]any{"k": v}`. Strings, comments, and real Go composite literals
 are left alone, so nothing you already had stops working.
 
-## Templates
-
-A tiny `${...}` interpolator, for when you want expressions embedded in a
-string:
-
-```go
-tmpl, err := expr.NewTemplate(
-    `Hello ${user.name}! You have ${len(user.tasks)} task(s).`,
-    expr.WithBuiltins(),
-)
-out, err := tmpl.Render(ctx, env)
-```
-
-Each `${...}` is compiled once at construction time and re-evaluated on every
-`Render`.
-
 ## Higher-order forms
 
 A small set of always-available forms for working with lists: `map`, `filter`,
@@ -128,10 +158,9 @@ registering a function or env value of the same name.
 `if`/`for`, no blocks, no function definitions. An expression takes an
 environment and produces a value. That's the whole shape of it.
 
-If you need mutation or side effects, don't reach for a bigger language —
-register a Go function that does the thing, and call it from the expression.
-Your host program stays in charge of what's allowed, and the expression stays
-easy to reason about.
+If you need mutation or side effects, register a Go function that does the
+thing. Call it from the expression. Your host program stays in charge of what's
+allowed, and the expression stays easy to reason about.
 
 ## Safety
 
@@ -148,10 +177,10 @@ define new functions from inside an expression.
 are excellent, and both are much larger. `expr` is deliberately smaller:
 
 | Library           | Non-test Go LOC | Parser          | Notes                                        |
-| ----------------- | --------------: | --------------- | -------------------------------------------- |
-| `deepnoodle/expr` |           ~3.9k | `go/parser`     | Go subset, JSON literals, `${...}` templates |
-| `expr-lang/expr`  |          ~29.9k | Custom          | Own grammar, optimizer, type checker         |
-| `cel-go`          |          ~71.0k | Custom (protos) | CEL spec, protobuf-native, type system       |
+| ----------------- | --------------- | --------------- | -------------------------------------------- |
+| `deepnoodle/expr` | ~4k             | `go/parser`     | Go subset, JSON literals, `${...}` templates |
+| `expr-lang/expr`  | ~30k            | Custom          | Own grammar, optimizer, type checker         |
+| `cel-go`          | ~70.0k          | Custom (protos) | CEL spec, protobuf-native, type system       |
 
 That's an order of magnitude smaller than `expr-lang`, nearly two than
 `cel-go`. You give up a pile of features you may never need. In exchange: no
@@ -162,10 +191,10 @@ dependencies, low complexity, and syntax anyone who writes Go already knows.
 Small doesn't mean slow. Throughout this section, `deepnoodle/expr` is this
 library and `expr-lang/expr` (sometimes just "expr-lang") is the separate
 [`github.com/expr-lang/expr`](https://github.com/expr-lang/expr) project.
-Across a set of canonical expressions borrowed from expr-lang's own bench
+Across a set of canonical expressions borrowed from that project's own bench
 suite, `deepnoodle/expr` is competitive with `expr-lang/expr` and faster
-than `cel-go` on nearly every case (the one exception is plain array
-indexing, where `cel-go` wins by a few nanoseconds):
+than `cel-go` on nearly every case. The one exception is plain array
+indexing, where `cel-go` wins by a few nanoseconds.
 
 ![Eval benchmark](docs/assets/bench_run.svg)
 
