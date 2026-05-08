@@ -152,9 +152,13 @@ func Compile(code string, opts ...Option) (*Program, error) {
 		opt(cfg)
 	}
 	parsed := preprocessSource(jsonlit.Rewrite(code))
-	node, err := parser.ParseExpr(parsed)
+	fset := token.NewFileSet()
+	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
+	}
+	if err := validate(fset, node); err != nil {
+		return nil, err
 	}
 	p := &Program{
 		source:    code,

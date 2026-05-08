@@ -122,6 +122,75 @@ func TestRewrite(t *testing.T) {
 		// "literal then index": [1][0] means "index 0 of array [1]".
 		{"literal_then_index", "[1][0]", "[]any{1}[0]"},
 		{"literal_then_index_multi", "[1,2,3][0]", "[]any{1,2,3}[0]"},
+
+		// --- multi-dimensional and array-of-slice type prefixes ---
+		// `[N][...]T` is a Go array-of-slice or 2D-array type and
+		// must pass through unchanged. The recursive form of
+		// isArrayTypeFollow handles arbitrary nesting as long as the
+		// innermost bracket pair is followed by a type.
+		{"array_of_slice", "[2][]int{{1},{2}}", "[2][]int{{1},{2}}"},
+		{"array_of_array", "[3][4]int{{1,2,3,4}}", "[3][4]int{{1,2,3,4}}"},
+		{"array_of_array_of_slice", "[2][3][]int{}", "[2][3][]int{}"},
+
+		// --- receive-only channel slice type ---
+		// `[]<-chan T{}` must pass through; '<-' starts a type.
+		{"slice_recv_chan", "[]<-chan int{}", "[]<-chan int{}"},
+
+		// --- function literals ---
+		// `{` after `)` is a function-literal body, not an object.
+		{"func_lit_empty", "func() {}", "func() {}"},
+		{"func_lit_returning_int", "func() int { return 1 }", "func() int { return 1 }"},
+		{"func_lit_in_call", "f(func() int { return 1 })", "f(func() int { return 1 })"},
+
+		// --- nested type-omitted composite literals ---
+		// Go allows omitting the inner type when the element type is
+		// itself a composite. jsonlit must respect that and leave the
+		// inner '{...}' alone.
+		{"slice_of_slice_omitted", "[][]int{{1,2},{3,4}}", "[][]int{{1,2},{3,4}}"},
+		{"slice_of_struct_omitted",
+			"[]struct{X int}{{1},{2}}",
+			"[]struct{X int}{{1},{2}}"},
+		{"slice_of_pointer_omitted", "[]*T{{}, {}}", "[]*T{{}, {}}"},
+		{"slice_of_map_omitted",
+			`[]map[string]int{{"a":1}}`,
+			`[]map[string]int{{"a":1}}`},
+		{"map_of_struct_omitted",
+			"map[int]struct{X int}{1: {1}, 2: {2}}",
+			"map[int]struct{X int}{1: {1}, 2: {2}}"},
+		{"map_of_slice_omitted",
+			`map[string][]int{"a": {1,2}}`,
+			`map[string][]int{"a": {1,2}}`},
+
+		// --- generic instantiations ---
+		// `T[U]{...}` is a Go 1.18+ generic composite literal.
+		// `]` must end a type expression in this context.
+		{"generic_empty", "List[int]{}", "List[int]{}"},
+		{"generic_with_values", "List[int]{1, 2}", "List[int]{1, 2}"},
+		{"generic_struct", "Box[string]{X: 1}", "Box[string]{X: 1}"},
+		{"generic_two_params", "M[K, V]{x: 1}", "M[K, V]{x: 1}"},
+
+		// --- comment preservation inside empty brackets ---
+		{"empty_array_with_block_comment",
+			"[/* note */]",
+			"[]any{/* note */}"},
+		{"empty_array_with_line_comment",
+			"[\n// note\n]",
+			"[]any{\n// note\n}"},
+
+		// --- typed-outer with bare-inner JSON literal ---
+		// When the outer type is `[]any` / `map[string]any` /
+		// `[]interface{}` / `map[string]interface{}`, the element
+		// type is interface and Go requires explicit element types.
+		// jsonlit's bare-{ rewrite stays in effect for these forms.
+		{"map_typed_nested_bare",
+			`map[string]any{"k": {"j": 1}}`,
+			`map[string]any{"k": map[string]any{"j": 1}}`},
+		{"slice_any_with_bare_obj",
+			`[]any{{"k": 1}}`,
+			`[]any{map[string]any{"k": 1}}`},
+		{"slice_interface_with_bare_obj",
+			`[]interface{}{{"k": 1}}`,
+			`[]interface{}{map[string]any{"k": 1}}`},
 	}
 
 	for _, tc := range cases {
@@ -261,6 +330,18 @@ func FuzzRewrite(f *testing.F) {
 		"a[0]", `"text"`,
 		"[]any{1}", `map[string]any{"k":1}`,
 		"[      ]", // empty array with interior whitespace
+		// shapes that previously broke the rewrite
+		"[2][]int{{1},{2}}",
+		"[3][4]int{{1,2,3,4}}",
+		"[]<-chan int{}",
+		"func() {}",
+		"[][]int{{1,2},{3,4}}",
+		"[]struct{X int}{{1},{2}}",
+		`map[string]any{"k": {"j": 1}}`,
+		`[]any{{"k": 1}}`,
+		"List[int]{1, 2}",
+		"Box[string]{X: 1}",
+		"[/* note */]",
 	}
 	for _, s := range seeds {
 		f.Add(s)

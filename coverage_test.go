@@ -264,14 +264,14 @@ func TestBuiltin_LenChan(t *testing.T) {
 	require.Equal(t, 2, got)
 }
 
-// --- evalUnary: unsupported operator token (e.g. ^) ---
+// --- Unary operator validation: unsupported operator token (e.g. ^) ---
 
 func TestEvalUnary_UnsupportedOperator(t *testing.T) {
-	// go/parser accepts ^x as a unary expression, but evalUnary only
-	// implements !, -, + — so it must reject with ErrEvaluate.
+	// go/parser accepts ^x as a unary expression, but expr only
+	// implements !, -, + so the validator rejects it at Compile.
 	_, err := evalExpr(t.Context(), "^1", nil)
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrEvaluate)
+	require.ErrorIs(t, err, ErrCompile)
 }
 
 // --- evalIdent and lookup fall-through for map with non-string key ---

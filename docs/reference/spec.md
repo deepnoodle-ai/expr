@@ -455,7 +455,8 @@ Only these `ast.Expr` node kinds are accepted; everything else returns
 - `*ast.CompositeLit` — restricted to `[]any{...}` and `map[string]any{...}`;
   see [Composite literals](#composite-literals)
 
-Explicitly **not** supported (parses, but errors at Run time):
+Explicitly **not** supported (parses, but rejected at Compile time
+with `ErrCompile`):
 
 - Slice expressions (`x[a:b]`, `x[a:b:c]`)
 - Type assertions (`x.(T)`)
@@ -480,9 +481,9 @@ expr evaluates two composite-literal shapes at run time:
   `string`. Duplicate keys are last-write-wins (Go's normal map behavior).
 
 Any other composite-literal form (`[]int{}`, `[3]int{}`, `map[int]any{}`,
-struct literals, etc.) returns `ErrEvaluate`. expr is untyped at the value
-level, so widening the accepted set would not change what the evaluator
-can represent.
+struct literals, etc.) is rejected at `Compile` with `ErrCompile`. expr
+is untyped at the value level, so widening the accepted set would not
+change what the evaluator can represent.
 
 ### JSON-style literals
 

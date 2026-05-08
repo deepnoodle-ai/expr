@@ -531,7 +531,7 @@ func TestEval_CompositeLit_Unsupported(t *testing.T) {
 		t.Run(src, func(t *testing.T) {
 			_, err := evalExpr(t.Context(), src, nil)
 			require.Error(t, err)
-			require.ErrorIs(t, err, ErrEvaluate)
+			require.ErrorIs(t, err, ErrCompile)
 		})
 	}
 }
