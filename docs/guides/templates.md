@@ -56,11 +56,12 @@ can't distinguish "value was nil" from "value was the empty string"
 in its output. If you need to, emit a sentinel in the expression:
 
 ```
-Nickname: ${user.nickname == nil && "(none)" || user.nickname}
+Nickname: ${if(user.nickname == nil, "(none)", user.nickname)}
 ```
 
-(That's the standard expr idiom for a ternary:
-`cond && ifTrue || ifFalse` — works when `ifTrue` is truthy.)
+`if(cond, t, f)` is the canonical ternary in expr. Both branches
+evaluate eagerly, so reach for `try(...)` or operand-returning
+`||` when you need to dodge a runtime error in one branch.
 
 ## The list-stringification footgun
 
@@ -167,8 +168,8 @@ is either "here's the full rendered string" or "here's an error," not
 - **Boolean flags:** `${admin && " (admin)"}` emits
   `" (admin)"` when truthy and `false` otherwise; `false` renders as
   `false` via `%v`, which is usually what you want for debugging but
-  wrong for user-facing text. Terminate boolean branches explicitly:
-  `${admin && " (admin)" || ""}`.
+  wrong for user-facing text. Use `if` to give the false branch an
+  explicit value: `${if(admin, " (admin)", "")}`.
 - **Counts with the right singular/plural:** register a `pluralize`
   helper, or compute the label in Go and pass it in.
 - **Currency:** format in Go. Templates are not the right place to

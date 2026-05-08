@@ -1,10 +1,11 @@
 # Higher-order patterns
 
 `map`, `filter`, `any`, `all`, `find`, `count` are the closest thing
-expr has to control flow. There's no `if`, no `for`, no `let`. These
-six forms — plus Go's short-circuit `&&` / `||` — are how you make
-decisions and shape data. This guide walks the idioms that come up
-most often and the ones you have to work around.
+expr has to control flow over collections. There's no `for` and no
+`let`. These six forms, plus the eager `if(cond, t, f)` builtin and
+Go's short-circuit `&&` / `||`, are how you make decisions and shape
+data. This guide walks the idioms that come up most often and the
+ones you have to work around.
 
 A runnable companion lives in
 [`../../examples/higher_order_patterns/`](../../examples/higher_order_patterns/).

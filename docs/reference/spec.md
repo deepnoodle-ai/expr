@@ -322,6 +322,7 @@ The standard set is:
 | `int(v)`        | `(any) -> int64, error`         | Numeric values convert (float truncates toward zero). Strings are parsed strictly with `strconv.ParseInt` base-10 (trimmed whitespace, no `0x`, no trailing garbage). |
 | `float(v)`      | `(any) -> float64, error`       | Like `int`, but `strconv.ParseFloat` 64-bit. |
 | `bool(v)`       | `(any) -> bool`                 | Same semantics as [truthiness](#truthiness). |
+| `if(c,t,f)`     | `(any, any, any) -> any`        | Eager three-argument selector: returns `t` when `c` is truthy, else `f`. Both branches always evaluate; reach for `try`, `&&`, or `\|\|` when one branch must be skipped. |
 | `contains(h,n)` | `(any, any) -> bool, error`     | Substring for string haystacks, element membership for slices/arrays (using [loose equality](#equality)), key presence for string-keyed maps. |
 | `has(m,k)`      | `(any, string) -> bool, error`  | True if map `m` has key `k`. Maps only. Nil → `false`. |
 | `keys(m)`       | `(any) -> []any, error`         | Sorted string keys. Other key types → error. |
