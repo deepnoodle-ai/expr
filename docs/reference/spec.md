@@ -91,11 +91,20 @@ group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
 
 ### Logical (`&& ||`)
 
-- Short-circuit. `false && X` evaluates to `false` without evaluating
-  `X`; `true || X` evaluates to `true` without evaluating `X`.
-- Both operands are run through [truthiness](#truthiness) rules first,
-  so `"x" && 1` is `true`.
-- The result type is always `bool`.
+- Short-circuit. `falsey && X` does not evaluate `X`; `truthy || X`
+  does not evaluate `X`. Whether an operand is "truthy" is decided by
+  the [truthiness](#truthiness) rules.
+- The result is the **deciding operand**, not a coerced bool. This
+  matches Python `and`/`or`, JavaScript `&&`/`||`, Lua, and Ruby:
+
+  ```
+  x || y    // x if truthy, else y
+  x && y    // x if falsey, else y
+  ```
+
+  So `"ada" || "(none)"` is `"ada"`, `"" || "(none)"` is `"(none)"`,
+  and `count || 0` falls back to `0` only when `count` is falsey.
+  Where a strict bool is required, wrap with `bool(...)`.
 
 ### Unary
 
@@ -132,7 +141,9 @@ which treats these as **falsey**:
 - Empty slice, array, or map
 - A nil channel, function, interface, map, pointer, or slice
 
-Everything else is truthy.
+Everything else is truthy. String content is not inspected:
+`bool("false")` is `true` because the string is non-empty. Callers who
+need to parse boolean strings should do so explicitly.
 
 ## Identifier resolution
 

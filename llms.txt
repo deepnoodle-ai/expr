@@ -241,10 +241,13 @@ See `docs/guides/examples.md` for worked multi-line expressions.
   errors, not panics.
 - **Truthiness:** nil, false, zero numbers, empty string, empty
   slice/array/map, and typed-nil nilable kinds are falsey. Everything
-  else is truthy.
-- **Short-circuit:** `&&` / `||` short-circuit on truthiness. `cond && "msg"`
-  returns the string when cond is true, which is the expr idiom for
-  "emit this value if the condition holds."
+  else is truthy. String content is not inspected: `bool("false")` is
+  `true`.
+- **`&&` / `||` return operands**, not coerced bools (Python `and`/`or`
+  semantics). `x || y` is `x` when `x` is truthy, else `y`; `x && y` is
+  `x` when `x` is falsey, else `y`. Common idioms: `name || "(none)"`,
+  `xs || []`, `count || 0`. Wrap with `bool(...)` when you need a
+  strict bool.
 - **String indexing** counts runes, matching `len` on strings.
 - **Selectors and index errors:** missing map keys, missing struct
   fields, nil selectors, and out-of-bounds indexes all return

@@ -106,15 +106,51 @@ func TestEval_ShortCircuit(t *testing.T) {
 	env := map[string]any{
 		"exploder": func() bool { panic("should not be called") },
 	}
-	// && short-circuits when lhs is false
+	// && short-circuits when lhs is falsey
 	got, err := evalExpr(t.Context(), "false && exploder()", env)
 	require.NoError(t, err)
 	require.Equal(t, false, got)
 
-	// || short-circuits when lhs is true
+	// || short-circuits when lhs is truthy
 	got, err = evalExpr(t.Context(), "true || exploder()", env)
 	require.NoError(t, err)
 	require.Equal(t, true, got)
+}
+
+// `&&` and `||` return the deciding operand (Python `and`/`or` semantics),
+// not a coerced bool. This composes with truthiness for idioms like
+// `name || "(none)"` and `xs || []`.
+func TestEval_LogicalReturnsOperand(t *testing.T) {
+	cases := []struct {
+		expr string
+		env  map[string]any
+		want any
+	}{
+		// || returns lhs when lhs is truthy, else rhs.
+		{`"ada" || "(none)"`, nil, "ada"},
+		{`"" || "(none)"`, nil, "(none)"},
+		{`nil || "(none)"`, nil, "(none)"},
+		{`0 || 42`, nil, int64(42)},
+		{`name || "(none)"`, map[string]any{"name": "Ada"}, "Ada"},
+		{`name || "(none)"`, map[string]any{"name": ""}, "(none)"},
+		{`name || "(none)"`, map[string]any{"name": nil}, "(none)"},
+		{`count || 0`, map[string]any{"count": int64(5)}, int64(5)},
+		{`count || 0`, map[string]any{"count": int64(0)}, int64(0)},
+
+		// && returns lhs when lhs is falsey, else rhs.
+		{`"a" && "b"`, nil, "b"},
+		{`"" && "b"`, nil, ""},
+		{`nil && "b"`, nil, nil},
+		{`0 && 1`, nil, int64(0)},
+		{`1 && 2`, nil, int64(2)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			got, err := evalExpr(t.Context(), tc.expr, tc.env)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestEval_Selectors(t *testing.T) {

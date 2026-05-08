@@ -97,15 +97,16 @@ type mystr string
 type mybool bool
 type myint int
 
-// These three tests pin the (correct) behavior that IsTruthy resolves
-// typed primitives via the reflect fallback. I initially suspected this
-// was broken; verifying it isn't is still useful as a regression guard.
+// These tests pin the (correct) behavior that IsTruthy resolves
+// typed primitives via the reflect fallback.
 func TestAdversarial_TruthyTypedString(t *testing.T) {
 	if IsTruthy(mystr("")) {
 		t.Fatalf("IsTruthy(mystr(\"\")) should be false, got true")
 	}
-	if IsTruthy(mystr("false")) {
-		t.Fatalf("IsTruthy(mystr(\"false\")) should be false (matches plain string rule), got true")
+	// Non-empty strings are truthy regardless of content. The string
+	// "false" is just a five-character string.
+	if !IsTruthy(mystr("false")) {
+		t.Fatalf("IsTruthy(mystr(\"false\")) should be true (non-empty string), got false")
 	}
 	if !IsTruthy(mystr("hello")) {
 		t.Fatalf("IsTruthy(mystr(\"hello\")) should be true")

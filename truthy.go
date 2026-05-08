@@ -1,21 +1,22 @@
 package expr
 
-import (
-	"reflect"
-	"strings"
-)
+import "reflect"
 
 // IsTruthy reports whether a Go value should be treated as truthy in
 // expr conditionals. The rules are:
 //
+//   - nil: false
 //   - bool: itself
 //   - numeric: non-zero is truthy
-//   - string: non-empty and not "false" (case-insensitive)
-//   - slices/arrays/maps: non-empty is truthy
-//   - nil: false
-//   - anything else: non-nil is truthy
+//   - string: non-empty
+//   - slices, arrays, maps: non-empty is truthy
+//   - chan, func, interface, pointer: non-nil is truthy
+//   - anything else: truthy
 //
-// This is also exposed as the bool() builtin.
+// This is also exposed as the bool() builtin. Note that string content
+// is not inspected; bool("false") is true because the string is
+// non-empty. Callers who need to parse boolean strings should do so
+// explicitly.
 func IsTruthy(value any) bool {
 	switch v := value.(type) {
 	case nil:
@@ -47,7 +48,7 @@ func IsTruthy(value any) bool {
 	case float64:
 		return v != 0
 	case string:
-		return v != "" && !strings.EqualFold(v, "false")
+		return v != ""
 	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
@@ -60,8 +61,7 @@ func IsTruthy(value any) bool {
 	case reflect.Float32, reflect.Float64:
 		return rv.Float() != 0
 	case reflect.String:
-		s := rv.String()
-		return s != "" && !strings.EqualFold(s, "false")
+		return rv.String() != ""
 	case reflect.Slice, reflect.Array, reflect.Map:
 		return rv.Len() > 0
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer:
