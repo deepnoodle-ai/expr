@@ -169,6 +169,10 @@ config?.feature?.enabled
 The rewrite is token-level and skips strings, runes, and comments,
 so `"obj?.field"` and `// obj?.field` survive untouched.
 
+There is no `??` operator. Use `?.` / `?[` with operand-returning
+`||` for nil-or-fallback, and `try(x, default)` when the LHS may be
+a meaningful falsey value you want to keep.
+
 ## Custom functions
 
 ```go

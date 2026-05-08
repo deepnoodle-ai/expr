@@ -28,44 +28,65 @@ type itEnv struct {
 // special form so evalCall can dispatch via a single map lookup.
 type higherOrderForm func(*Program, context.Context, *ast.CallExpr, any, int) (any, error)
 
-// higherOrderForms maps builtin names to their special-form
+// userForm describes one user-visible higher-order special form. It
+// is the single source of truth that drives the dispatch table, the
+// suggester's "did you mean" candidate set, and the "is a special
+// form" hint shown for bare-identifier references. Adding a form
+// means appending one entry here; the three derived tables stay in
+// lockstep automatically.
+type userForm struct {
+	// name is the spelling users type. For `map` this differs from
+	// the dispatch key because Go's parser reserves `map`; the
+	// engine rewrites the spelling to mapFormName before parsing.
+	name string
+	// internal is the key under which fn is registered in
+	// higherOrderForms. Equal to name for every form except `map`.
+	internal string
+	// callHint is the signature shown in the "is a special form"
+	// suggester message, e.g. `map(xs, predicate)`.
+	callHint string
+	fn       higherOrderForm
+}
+
+// userForms enumerates every user-visible special form. Order is
+// stable for deterministic iteration in the suggester. Populated in
+// init for the same reason as higherOrderForms: the fn references
+// reach back through the evaluator into specialFormHint, which reads
+// this slice — Go's initialization-cycle check flags that as a
+// direct cycle.
+var userForms []userForm
+
+// higherOrderForms maps dispatch keys to their special-form
 // evaluators. Unlike ordinary functions in the engine's funcs map,
 // these receive the raw *ast.CallExpr so they can re-evaluate the
 // predicate argument per element with `it`/`index` in scope.
 //
-// These names are active by default but are not reserved: a
-// user-registered function or an env entry of the same name shadows
-// the form, matching the identifier-resolution order used everywhere
-// else in expr. See the dispatch in evalCall.
-//
-// Populated in init rather than as a var initializer because the
-// function bodies transitively reach p.evalCall, which reads this
-// map — Go's initialization-cycle check flags that as a direct cycle.
+// User-visible form names are not reserved: a user-registered
+// function or an env entry of the same name shadows the form,
+// matching the identifier-resolution order used everywhere else in
+// expr. See the dispatch in evalCall.
 var higherOrderForms map[string]higherOrderForm
 
 func init() {
-	higherOrderForms = map[string]higherOrderForm{
-		// map is rewritten by preprocessSource to the internal
-		// identifier before parsing because `map` is a Go keyword.
-		mapFormName: formMap,
-		"filter":    formFilter,
-		"any":       formAny,
-		"all":       formAll,
-		"find":      formFind,
-		"count":     formCount,
-		"try":       formTry,
-		// Sentinel forms emitted by the optaccess pre-parse rewrite.
-		// Users do not type these names; they appear only as the
-		// callee of synthesized CallExpr nodes.
-		trySelectFormName: formTrySelect,
-		tryIndexFormName:  formTryIndex,
+	userForms = []userForm{
+		{name: "map", internal: mapFormName, callHint: "map(xs, predicate)", fn: formMap},
+		{name: "filter", internal: "filter", callHint: "filter(xs, predicate)", fn: formFilter},
+		{name: "any", internal: "any", callHint: "any(xs, predicate)", fn: formAny},
+		{name: "all", internal: "all", callHint: "all(xs, predicate)", fn: formAll},
+		{name: "find", internal: "find", callHint: "find(xs, predicate)", fn: formFind},
+		{name: "count", internal: "count", callHint: "count(xs, predicate)", fn: formCount},
+		{name: "try", internal: "try", callHint: "try(value, default)", fn: formTry},
 	}
+	higherOrderForms = make(map[string]higherOrderForm, len(userForms)+2)
+	for _, f := range userForms {
+		higherOrderForms[f.internal] = f.fn
+	}
+	// Sentinel forms emitted by the optaccess pre-parse rewrite.
+	// Users do not type these names; they appear only as the
+	// callee of synthesized CallExpr nodes.
+	higherOrderForms[trySelectFormName] = formTrySelect
+	higherOrderForms[tryIndexFormName] = formTryIndex
 }
-
-// higherOrderNames is the user-visible list of special-form builtins.
-// It drives "did you mean" hints so users see the spelling they would
-// actually type (`map`, not the internal rewritten name).
-var higherOrderNames = []string{"map", "filter", "any", "all", "find", "count", "try"}
 
 // iterItems evaluates collExpr and converts the result to a []any for
 // predicate iteration. nil is treated as an empty list so

@@ -443,6 +443,12 @@ appear in error chains for diagnostic purposes. Strings, runes, and
 comments are not rewritten — `?.` written inside `"..."` or a
 comment is preserved verbatim.
 
+A nil-coalescing `??` operator is **not** provided. The combination
+of `?.` / `?[`, operand-returning `||`, and `try(value, default)`
+covers the same use cases. When the LHS is a meaningful falsey value
+that should be kept (`0`, `""`, `[]`), use `try(x, default)`
+explicitly.
+
 ## Helpful errors
 
 expr annotates "not found" errors with a short hint drawn from the
