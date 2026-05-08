@@ -14,15 +14,15 @@ import (
 // to list, the hint reads `(available: a, b, c)`. When neither
 // condition holds the hint is empty, so the original error message is
 // unchanged.
-func identHint(env any, funcs map[string]any, name string) string {
-	return formatHint(name, availableIdents(env, funcs))
+func identHint(env any, funcs map[string]any, name string, fieldTags *structTagConfig) string {
+	return formatHint(name, availableIdents(env, funcs, fieldTags))
 }
 
 // fieldHint is identHint's counterpart for selector and index
 // lookups: it reports the names reachable on a specific receiver
 // value (struct fields/methods or the keys of a string-keyed map).
-func fieldHint(recv any, name string) string {
-	return formatHint(name, availableFields(recv))
+func fieldHint(recv any, name string, fieldTags *structTagConfig) string {
+	return formatHint(name, availableFields(recv, fieldTags))
 }
 
 func formatHint(name string, candidates []string) string {
@@ -128,8 +128,8 @@ func min3(a, b, c int) int {
 // could legitimately resolve to: env keys/fields/methods plus every
 // registered function. Used only to build error hints, so allocation
 // cost only matters on the error path.
-func availableIdents(env any, funcs map[string]any) []string {
-	names := availableFields(env)
+func availableIdents(env any, funcs map[string]any, fieldTags *structTagConfig) []string {
+	names := availableFields(env, fieldTags)
 	for k := range funcs {
 		names = append(names, k)
 	}
@@ -145,7 +145,7 @@ func availableIdents(env any, funcs map[string]any) []string {
 // For nested itEnv scopes, the caller's parent env is walked too, so
 // a typo inside a `map(...)` predicate can still suggest an outer
 // binding.
-func availableFields(recv any) []string {
+func availableFields(recv any, fieldTags *structTagConfig) []string {
 	if recv == nil {
 		return nil
 	}
@@ -158,7 +158,7 @@ func availableFields(recv any) []string {
 	}
 	if it, ok := recv.(*itEnv); ok {
 		out := []string{"it", "index"}
-		return append(out, availableFields(it.parent)...)
+		return append(out, availableFields(it.parent, fieldTags)...)
 	}
 	rv := reflect.ValueOf(recv)
 	orig := rv
@@ -171,6 +171,10 @@ func availableFields(recv any) []string {
 	var names []string
 	switch rv.Kind() {
 	case reflect.Struct:
+		if fieldTags != nil {
+			names = append(names, availableTaggedFields(recv, fieldTags)...)
+			break
+		}
 		t := rv.Type()
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)

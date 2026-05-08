@@ -69,8 +69,9 @@ type Option func(*compileConfig)
 // It is consumed during parsing to build the function dispatch tables
 // baked into the resulting Program.
 type compileConfig struct {
-	funcs    map[string]any
-	prepared map[string]*preparedFunc
+	funcs     map[string]any
+	prepared  map[string]*preparedFunc
+	fieldTags *structTagConfig
 }
 
 func newCompileConfig() *compileConfig {
@@ -113,6 +114,27 @@ func WithFunctions(funcs map[string]any) Option {
 	}
 }
 
+// WithStructTags enables struct field lookup by the named struct tags.
+// Tags are checked in the order provided before falling back to the Go
+// exported field name. Tag options after a comma are ignored, so
+// `json:"name,omitempty"` resolves as `name` and `json:",omitempty"`
+// falls back to the Go field name.
+//
+// The option is opt-in; without it, struct fields resolve only by Go field
+// name, preserving expr's default behavior. `expr:"-"` hides a field when
+// the expr tag is configured; duplicate resolved names return an ambiguity
+// error at evaluation time.
+func WithStructTags(names ...string) Option {
+	return func(c *compileConfig) {
+		c.fieldTags = newStructTagConfig(names)
+	}
+}
+
+// WithFieldTags is an alias for [WithStructTags].
+func WithFieldTags(names ...string) Option {
+	return WithStructTags(names...)
+}
+
 // Compile parses an expression once for repeated evaluation. The returned
 // Program is immutable and safe for concurrent use. Input longer than
 // MaxSourceLength is rejected without calling the parser.
@@ -134,7 +156,13 @@ func Compile(code string, opts ...Option) (*Program, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
 	}
-	p := &Program{source: code, root: node, funcs: cfg.funcs, prepared: cfg.prepared}
+	p := &Program{
+		source:    code,
+		root:      node,
+		funcs:     cfg.funcs,
+		prepared:  cfg.prepared,
+		fieldTags: cfg.fieldTags,
+	}
 	p.compile()
 	return p, nil
 }

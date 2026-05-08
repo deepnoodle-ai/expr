@@ -85,6 +85,7 @@ any shared name.
 | ------------------------------------- | ---------------------------------------------------------- |
 | `expr.WithBuiltins()`                 | Registers the standard builtin function set (see below)   |
 | `expr.WithFunctions(map[string]any{})`| Registers arbitrary Go functions as callable identifiers   |
+| `expr.WithStructTags("json")`         | Opts struct field lookup into tag names before Go names    |
 
 Builtins are opt-in: if you don't pass `WithBuiltins`, the only callable
 names are the higher-order forms (always registered) and anything you
@@ -168,6 +169,29 @@ expr.WithFunctions(map[string]any{
 p, _ := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins())
 v, _ := p.Run(ctx, order) // struct or *struct with a Subtotal() method
 ```
+
+Struct tags are ignored unless configured. Use
+`expr.WithStructTags("expr", "json")` or the alias `WithFieldTags` to
+resolve exported fields by tags first:
+
+```go
+type Output struct {
+    Environment Environment `json:"environment"`
+}
+type Environment struct {
+    Status string `json:"status"`
+}
+
+p, _ := expr.Compile(`result.environment.status == "ready"`,
+    expr.WithStructTags("json"))
+```
+
+Tag options after commas are ignored (`json:"email,omitempty"` →
+`email`), empty tag names fall back to the Go field name
+(`json:",omitempty"`), `expr:"-"` hides a field when `expr` tags are
+configured, and duplicate resolved names error as ambiguous. Tag
+precedence is strict per field: if `expr:"name"` wins, lower tag aliases
+and the Go field name for that field are not also exposed.
 
 ## Templates
 

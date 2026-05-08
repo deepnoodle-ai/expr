@@ -69,6 +69,16 @@ p, err := expr.Compile(`Subtotal() > 100 && len(Items) >= 2`, expr.WithBuiltins(
 v, err := p.Run(ctx, order) // order is some struct with a Subtotal() method
 ```
 
+Struct tags are opt-in when your expression surface should match a JSON-shaped
+API contract:
+
+```go
+p, err := expr.Compile(
+    `result.environment.status == "ready"`,
+    expr.WithStructTags("json"),
+)
+```
+
 ## JSON-style literals
 
 Object and array literals work the way you'd hope, without the Go ceremony:
