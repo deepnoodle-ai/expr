@@ -230,6 +230,25 @@ func TestDocsExample6_StructEnv(t *testing.T) {
 	assertDeepEqual(t, got, true)
 }
 
+type docEnvironmentOutput struct {
+	Environment docEnvironment `json:"environment"`
+}
+
+type docEnvironment struct {
+	Status string `json:"status"`
+}
+
+func TestDocsExample6_StructTags(t *testing.T) {
+	src := `result.environment.status == "ready"`
+	env := map[string]any{
+		"result": docEnvironmentOutput{
+			Environment: docEnvironment{Status: "ready"},
+		},
+	}
+	got := runDocExample(t, src, env, WithStructTags("json"))
+	assertDeepEqual(t, got, true)
+}
+
 // Example 7: Role-based access control.
 func TestDocsExample7_RBAC(t *testing.T) {
 	src := `{

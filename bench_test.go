@@ -248,6 +248,120 @@ func Benchmark_envStruct(b *testing.B) {
 	}
 }
 
+type taggedPrice struct {
+	Value int `json:"value"`
+}
+type taggedPriceEnv struct {
+	Price taggedPrice `json:"price"`
+}
+
+func Benchmark_structTagsNested(b *testing.B) {
+	env := taggedPriceEnv{Price: taggedPrice{Value: 1}}
+	cases := []struct {
+		name string
+		src  string
+		opts []expr.Option
+	}{
+		{name: "go_names", src: `Price.Value > 0`, opts: engOpts},
+		{name: "json_tags", src: `price.value > 0`, opts: []expr.Option{expr.WithBuiltins(), expr.WithStructTags("json")}},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			program, err := expr.Compile(tc.src, tc.opts...)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var out any
+			ctx := context.Background()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				out, err = program.Run(ctx, env)
+			}
+			b.StopTimer()
+
+			if err != nil {
+				b.Fatal(err)
+			}
+			if !out.(bool) {
+				b.Fatalf("unexpected result %v", out)
+			}
+		})
+	}
+}
+
+type wideTaggedEnv struct {
+	Field00 int `json:"field_00"`
+	Field01 int `json:"field_01"`
+	Field02 int `json:"field_02"`
+	Field03 int `json:"field_03"`
+	Field04 int `json:"field_04"`
+	Field05 int `json:"field_05"`
+	Field06 int `json:"field_06"`
+	Field07 int `json:"field_07"`
+	Field08 int `json:"field_08"`
+	Field09 int `json:"field_09"`
+	Field10 int `json:"field_10"`
+	Field11 int `json:"field_11"`
+	Field12 int `json:"field_12"`
+	Field13 int `json:"field_13"`
+	Field14 int `json:"field_14"`
+	Field15 int `json:"field_15"`
+	Field16 int `json:"field_16"`
+	Field17 int `json:"field_17"`
+	Field18 int `json:"field_18"`
+	Field19 int `json:"field_19"`
+	Field20 int `json:"field_20"`
+	Field21 int `json:"field_21"`
+	Field22 int `json:"field_22"`
+	Field23 int `json:"field_23"`
+	Field24 int `json:"field_24"`
+	Field25 int `json:"field_25"`
+	Field26 int `json:"field_26"`
+	Field27 int `json:"field_27"`
+	Field28 int `json:"field_28"`
+	Field29 int `json:"field_29"`
+	Field30 int `json:"field_30"`
+	Field31 int `json:"field_31"`
+}
+
+func Benchmark_structTagsWide(b *testing.B) {
+	env := wideTaggedEnv{Field31: 42}
+	cases := []struct {
+		name string
+		src  string
+		opts []expr.Option
+	}{
+		{name: "go_names", src: `Field31 > 0 && Field31 < 99`, opts: engOpts},
+		{name: "json_tags", src: `field_31 > 0 && field_31 < 99`, opts: []expr.Option{expr.WithBuiltins(), expr.WithStructTags("json")}},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			program, err := expr.Compile(tc.src, tc.opts...)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var out any
+			ctx := context.Background()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				out, err = program.Run(ctx, env)
+			}
+			b.StopTimer()
+
+			if err != nil {
+				b.Fatal(err)
+			}
+			if !out.(bool) {
+				b.Fatalf("unexpected result %v", out)
+			}
+		})
+	}
+}
+
 func Benchmark_envMap(b *testing.B) {
 	env := map[string]any{
 		"price": Price{Value: 1},

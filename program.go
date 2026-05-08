@@ -13,10 +13,11 @@ import (
 // Program is a compiled expression. Programs are immutable and safe for
 // concurrent evaluation across goroutines.
 type Program struct {
-	source   string
-	root     ast.Expr
-	funcs    map[string]any
-	prepared map[string]*preparedFunc
+	source    string
+	root      ast.Expr
+	funcs     map[string]any
+	prepared  map[string]*preparedFunc
+	fieldTags *structTagConfig
 
 	// callCache maps CallExpr nodes to a pre-resolved preparedFunc for
 	// the common case of a bare-identifier call target that resolves to
@@ -258,7 +259,7 @@ func (p *Program) eval(ctx context.Context, node ast.Expr, env any, depth int) (
 		}
 		return evalLiteral(n)
 	case *ast.Ident:
-		return evalIdent(n, env, p.funcs)
+		return evalIdent(n, env, p.funcs, p.fieldTags)
 	case *ast.ParenExpr:
 		return p.eval(ctx, n.X, env, depth)
 	case *ast.UnaryExpr:
@@ -374,7 +375,7 @@ func evalLiteral(n *ast.BasicLit) (any, error) {
 	return nil, fmt.Errorf("%w: unsupported literal kind %v", ErrEvaluate, n.Kind)
 }
 
-func evalIdent(n *ast.Ident, env any, funcs map[string]any) (any, error) {
+func evalIdent(n *ast.Ident, env any, funcs map[string]any, fieldTags *structTagConfig) (any, error) {
 	switch n.Name {
 	case "true":
 		return true, nil
@@ -383,7 +384,9 @@ func evalIdent(n *ast.Ident, env any, funcs map[string]any) (any, error) {
 	case "nil":
 		return nil, nil
 	}
-	if v, ok := lookupEnv(env, n.Name); ok {
+	if v, ok, err := lookupEnv(env, n.Name, fieldTags); err != nil {
+		return nil, err
+	} else if ok {
 		return v, nil
 	}
 	if fn, ok := funcs[n.Name]; ok {
@@ -391,31 +394,32 @@ func evalIdent(n *ast.Ident, env any, funcs map[string]any) (any, error) {
 	}
 	user := displayIdent(n.Name)
 	return nil, fmt.Errorf("%w: undefined identifier %q%s",
-		ErrEvaluate, user, identHint(env, funcs, user))
+		ErrEvaluate, user, identHint(env, funcs, user, fieldTags))
 }
 
 // lookupEnv resolves a top-level identifier against env. env may be a
 // map[string]any, any map with string keys, a struct, a pointer to a
-// struct, or an *itEnv wrapping one of the above. For structs, fields
-// are preferred over methods when both match. Methods are returned as
-// bound function values so they can be invoked by a CallExpr node. An
-// itEnv binds `it` and `index` ahead of anything in its parent.
-func lookupEnv(env any, name string) (any, bool) {
+// struct, or an *itEnv wrapping one of the above. For structs, configured
+// field tags participate in field lookup, and fields are preferred over
+// methods when both match. Methods are returned as bound function values
+// so they can be invoked by a CallExpr node. An itEnv binds `it` and
+// `index` ahead of anything in its parent.
+func lookupEnv(env any, name string, fieldTags *structTagConfig) (any, bool, error) {
 	if env == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	if it, ok := env.(*itEnv); ok {
 		switch name {
 		case "it":
-			return it.it, true
+			return it.it, true, nil
 		case "index":
-			return it.index, true
+			return it.index, true, nil
 		}
-		return lookupEnv(it.parent, name)
+		return lookupEnv(it.parent, name, fieldTags)
 	}
 	if m, ok := env.(map[string]any); ok {
 		v, ok := m[name]
-		return v, ok
+		return v, ok, nil
 	}
 	rv := reflect.ValueOf(env)
 	// Check methods on the original (possibly pointer) value first so
@@ -424,27 +428,31 @@ func lookupEnv(env any, name string) (any, bool) {
 	orig := rv
 	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			return nil, false
+			return nil, false, nil
 		}
 		rv = rv.Elem()
 	}
 	switch rv.Kind() {
 	case reflect.Struct:
-		if fv := rv.FieldByName(name); fv.IsValid() && fv.CanInterface() {
-			return fv.Interface(), true
+		fv, ok, err := structFieldByName(rv, name, fieldTags)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok && fv.CanInterface() {
+			return fv.Interface(), true, nil
 		}
 		if mv := orig.MethodByName(name); mv.IsValid() {
-			return methodCallable(name, mv), true
+			return methodCallable(name, mv), true, nil
 		}
 	case reflect.Map:
 		if rv.Type().Key().Kind() == reflect.String {
 			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 			if mv.IsValid() {
-				return mv.Interface(), true
+				return mv.Interface(), true, nil
 			}
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 func (p *Program) evalUnary(ctx context.Context, n *ast.UnaryExpr, env any, depth int) (any, error) {
@@ -664,14 +672,14 @@ func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any
 	// embedded array gets memcpy'd on each access. The fast path skips
 	// plain map[string]any roots because the type-asserted map lookup
 	// in selectField is already faster than reflect MapIndex.
-	if v, ok, err := evalSelectorChainRV(n, env, depth); ok {
+	if v, ok, err := evalSelectorChainRV(n, env, depth, p.fieldTags); ok {
 		return v, err
 	}
 	recv, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
 		return nil, err
 	}
-	return selectField(recv, n.Sel.Name)
+	return selectField(recv, n.Sel.Name, p.fieldTags)
 }
 
 // evalSelectorChainRV walks an ident-rooted selector chain in reflect
@@ -680,7 +688,7 @@ func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any
 // declines for non-ident roots, for plain map[string]any envs (the
 // general path is faster there), and for itEnv lookups of `it`/`index`
 // whose values do not benefit.
-func evalSelectorChainRV(n *ast.SelectorExpr, env any, depth int) (any, bool, error) {
+func evalSelectorChainRV(n *ast.SelectorExpr, env any, depth int, fieldTags *structTagConfig) (any, bool, error) {
 	if _, isMap := env.(map[string]any); isMap {
 		return nil, false, nil
 	}
@@ -706,12 +714,15 @@ func evalSelectorChainRV(n *ast.SelectorExpr, env any, depth int) (any, bool, er
 	case "true", "false", "nil":
 		return nil, false, nil
 	}
-	rv, ok := lookupEnvRV(env, ident.Name)
+	rv, ok, err := lookupEnvRV(env, ident.Name, fieldTags)
+	if err != nil {
+		return nil, true, err
+	}
 	if !ok {
 		return nil, false, nil
 	}
 	for i := len(names) - 1; i >= 0; i-- {
-		next, err := selectFieldRV(rv, displayIdent(names[i]))
+		next, err := selectFieldRV(rv, displayIdent(names[i]), fieldTags)
 		if err != nil {
 			return nil, true, err
 		}
@@ -731,51 +742,55 @@ func evalSelectorChainRV(n *ast.SelectorExpr, env any, depth int) (any, bool, er
 // can chain field accesses without boxing intermediate struct values.
 // Map and itEnv lookups still go through any internally because their
 // stored values already live behind interfaces.
-func lookupEnvRV(env any, name string) (reflect.Value, bool) {
+func lookupEnvRV(env any, name string, fieldTags *structTagConfig) (reflect.Value, bool, error) {
 	if env == nil {
-		return reflect.Value{}, false
+		return reflect.Value{}, false, nil
 	}
 	if it, ok := env.(*itEnv); ok {
 		switch name {
 		case "it":
-			return reflect.ValueOf(it.it), true
+			return reflect.ValueOf(it.it), true, nil
 		case "index":
-			return reflect.ValueOf(it.index), true
+			return reflect.ValueOf(it.index), true, nil
 		}
-		return lookupEnvRV(it.parent, name)
+		return lookupEnvRV(it.parent, name, fieldTags)
 	}
 	if m, ok := env.(map[string]any); ok {
 		v, ok := m[name]
 		if !ok {
-			return reflect.Value{}, false
+			return reflect.Value{}, false, nil
 		}
-		return reflect.ValueOf(v), true
+		return reflect.ValueOf(v), true, nil
 	}
 	rv := reflect.ValueOf(env)
 	orig := rv
 	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			return reflect.Value{}, false
+			return reflect.Value{}, false, nil
 		}
 		rv = rv.Elem()
 	}
 	switch rv.Kind() {
 	case reflect.Struct:
-		if fv := rv.FieldByName(name); fv.IsValid() && fv.CanInterface() {
-			return fv, true
+		fv, ok, err := structFieldByName(rv, name, fieldTags)
+		if err != nil {
+			return reflect.Value{}, false, err
+		}
+		if ok && fv.CanInterface() {
+			return fv, true, nil
 		}
 		if mv := orig.MethodByName(name); mv.IsValid() {
-			return reflect.ValueOf(methodCallable(name, mv)), true
+			return reflect.ValueOf(methodCallable(name, mv)), true, nil
 		}
 	case reflect.Map:
 		if rv.Type().Key().Kind() == reflect.String {
 			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 			if mv.IsValid() {
-				return mv, true
+				return mv, true, nil
 			}
 		}
 	}
-	return reflect.Value{}, false
+	return reflect.Value{}, false, nil
 }
 
 // selectFieldRV reads a field/key from rv without boxing the parent
@@ -783,7 +798,7 @@ func lookupEnvRV(env any, name string) (reflect.Value, bool) {
 // string-keyed maps, transparently dereffing pointers and unwrapping
 // interface values. Errors are produced lazily — the cold path may
 // call Interface() to build a "did you mean" hint.
-func selectFieldRV(rv reflect.Value, name string) (reflect.Value, error) {
+func selectFieldRV(rv reflect.Value, name string, fieldTags *structTagConfig) (reflect.Value, error) {
 	for rv.Kind() == reflect.Interface && !rv.IsNil() {
 		rv = rv.Elem()
 	}
@@ -798,10 +813,13 @@ func selectFieldRV(rv reflect.Value, name string) (reflect.Value, error) {
 	}
 	switch rv.Kind() {
 	case reflect.Struct:
-		fv := rv.FieldByName(name)
-		if !fv.IsValid() || !fv.CanInterface() {
+		fv, ok, err := structFieldByName(rv, name, fieldTags)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if !ok || !fv.IsValid() || !fv.CanInterface() {
 			return reflect.Value{}, fmt.Errorf("%w: field %q not found on %v%s",
-				ErrEvaluate, name, rv.Type(), fieldHint(rv.Interface(), name))
+				ErrEvaluate, name, rv.Type(), fieldHint(rv.Interface(), name, fieldTags))
 		}
 		return fv, nil
 	case reflect.Map:
@@ -811,14 +829,14 @@ func selectFieldRV(rv reflect.Value, name string) (reflect.Value, error) {
 		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 		if !mv.IsValid() {
 			return reflect.Value{}, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, name, fieldHint(rv.Interface(), name))
+				ErrEvaluate, name, fieldHint(rv.Interface(), name, fieldTags))
 		}
 		return mv, nil
 	}
 	return reflect.Value{}, fmt.Errorf("%w: cannot select %q on %v", ErrEvaluate, name, rv.Type())
 }
 
-func selectField(recv any, name string) (any, error) {
+func selectField(recv any, name string, fieldTags *structTagConfig) (any, error) {
 	// Translate rewritten identifiers (currently only `map`) back to
 	// their user-visible form so field/key/error lookups match what
 	// the user actually typed.
@@ -830,7 +848,7 @@ func selectField(recv any, name string) (any, error) {
 		v, ok := m[name]
 		if !ok {
 			return nil, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, name, fieldHint(recv, name))
+				ErrEvaluate, name, fieldHint(recv, name, fieldTags))
 		}
 		return v, nil
 	}
@@ -843,26 +861,29 @@ func selectField(recv any, name string) (any, error) {
 		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
 		if !mv.IsValid() {
 			return nil, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, name, fieldHint(recv, name))
+				ErrEvaluate, name, fieldHint(recv, name, fieldTags))
 		}
 		return mv.Interface(), nil
 	case reflect.Struct:
-		fv := rv.FieldByName(name)
-		if !fv.IsValid() {
+		fv, ok, err := structFieldByName(rv, name, fieldTags)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !fv.IsValid() {
 			return nil, fmt.Errorf("%w: field %q not found on %T%s",
-				ErrEvaluate, name, recv, fieldHint(recv, name))
+				ErrEvaluate, name, recv, fieldHint(recv, name, fieldTags))
 		}
 		if !fv.CanInterface() {
 			// Unexported field: deny access rather than panicking via Interface().
 			return nil, fmt.Errorf("%w: field %q not found on %T%s",
-				ErrEvaluate, name, recv, fieldHint(recv, name))
+				ErrEvaluate, name, recv, fieldHint(recv, name, fieldTags))
 		}
 		return fv.Interface(), nil
 	case reflect.Pointer:
 		if rv.IsNil() {
 			return nil, fmt.Errorf("%w: cannot access %q on nil pointer", ErrEvaluate, name)
 		}
-		return selectField(rv.Elem().Interface(), name)
+		return selectField(rv.Elem().Interface(), name, fieldTags)
 	}
 	return nil, fmt.Errorf("%w: cannot select %q on %T", ErrEvaluate, name, recv)
 }
@@ -901,7 +922,9 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 	}
 	// Respect identifier shadowing: a user-registered or env-bound
 	// "filter" goes through the general call path.
-	if _, inEnv := lookupEnv(env, "filter"); inEnv {
+	if _, inEnv, err := lookupEnv(env, "filter", p.fieldTags); err != nil {
+		return nil, false, err
+	} else if inEnv {
 		return nil, false, nil
 	}
 	if _, inFuncs := p.funcs["filter"]; inFuncs {
@@ -965,7 +988,7 @@ func indexValue(recv, idx any) (any, error) {
 		v, ok := m[key]
 		if !ok {
 			return nil, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, key, fieldHint(recv, key))
+				ErrEvaluate, key, fieldHint(recv, key, nil))
 		}
 		return v, nil
 	}
@@ -1027,7 +1050,9 @@ func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth 
 	// shadowed by the runtime env. This covers the overwhelming
 	// majority of builtin call sites (len, has, contains, ...).
 	if pf := p.callCache[n]; pf != nil {
-		if _, shadowed := lookupEnv(env, pf.name); !shadowed {
+		if _, shadowed, err := lookupEnv(env, pf.name, p.fieldTags); err != nil {
+			return nil, err
+		} else if !shadowed {
 			args := make([]any, len(n.Args))
 			for i, a := range n.Args {
 				v, err := p.eval(ctx, a, env, depth)
@@ -1055,7 +1080,9 @@ func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth 
 	// to win, and env entries named "map" should be honored too.
 	if ident, isIdent := n.Fun.(*ast.Ident); isIdent {
 		if ident.Name == mapFormName {
-			if v, ok := lookupEnv(env, "map"); ok {
+			if v, ok, err := lookupEnv(env, "map", p.fieldTags); err != nil {
+				return nil, err
+			} else if ok {
 				return p.callValue(ctx, "map", v, n.Args, env, depth)
 			}
 			if v, ok := p.funcs["map"]; ok {
@@ -1064,7 +1091,9 @@ func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth 
 			return formMap(p, ctx, n, env, depth)
 		}
 		if form, isForm := higherOrderForms[ident.Name]; isForm {
-			if _, inEnv := lookupEnv(env, ident.Name); !inEnv {
+			if _, inEnv, err := lookupEnv(env, ident.Name, p.fieldTags); err != nil {
+				return nil, err
+			} else if !inEnv {
 				if _, inFuncs := p.funcs[ident.Name]; !inFuncs {
 					return form(p, ctx, n, env, depth)
 				}
@@ -1111,20 +1140,22 @@ func (p *Program) callValue(ctx context.Context, name string, fn any, argExprs [
 func (p *Program) resolveCallable(ctx context.Context, fun ast.Expr, env any, depth int) (string, any, error) {
 	switch f := fun.(type) {
 	case *ast.Ident:
-		if v, ok := lookupEnv(env, f.Name); ok {
+		if v, ok, err := lookupEnv(env, f.Name, p.fieldTags); err != nil {
+			return "", nil, err
+		} else if ok {
 			return f.Name, v, nil
 		}
 		if v, ok := p.funcs[f.Name]; ok {
 			return f.Name, v, nil
 		}
 		return "", nil, fmt.Errorf("%w: unknown function %q%s",
-			ErrEvaluate, f.Name, identHint(env, p.funcs, f.Name))
+			ErrEvaluate, f.Name, identHint(env, p.funcs, f.Name, p.fieldTags))
 	case *ast.SelectorExpr:
 		recv, err := p.eval(ctx, f.X, env, depth)
 		if err != nil {
 			return "", nil, err
 		}
-		fn, err := resolveMethod(recv, f.Sel.Name)
+		fn, err := resolveMethod(recv, f.Sel.Name, p.fieldTags)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1137,7 +1168,7 @@ func (p *Program) resolveCallable(ctx context.Context, fun ast.Expr, env any, de
 // and pointers it returns a bound method value; for map[string]any (or any
 // map with string keys) it returns the stored value; for map-like types
 // with other key kinds it fails. Missing methods return a descriptive error.
-func resolveMethod(recv any, name string) (any, error) {
+func resolveMethod(recv any, name string, fieldTags *structTagConfig) (any, error) {
 	// Translate rewritten identifiers (currently only `map`) back to
 	// their user-visible form so reflect.MethodByName and map lookups
 	// match what the user actually typed.
@@ -1150,7 +1181,7 @@ func resolveMethod(recv any, name string) (any, error) {
 			return v, nil
 		}
 		return nil, fmt.Errorf("%w: %q not found%s",
-			ErrEvaluate, name, fieldHint(recv, name))
+			ErrEvaluate, name, fieldHint(recv, name, fieldTags))
 	}
 	rv := reflect.ValueOf(recv)
 	if rv.Kind() == reflect.Pointer && rv.IsNil() {
@@ -1167,7 +1198,11 @@ func resolveMethod(recv any, name string) (any, error) {
 	}
 	switch rv.Kind() {
 	case reflect.Struct:
-		if fv := rv.FieldByName(name); fv.IsValid() && fv.CanInterface() {
+		fv, ok, err := structFieldByName(rv, name, fieldTags)
+		if err != nil {
+			return nil, err
+		}
+		if ok && fv.IsValid() && fv.CanInterface() {
 			return fv.Interface(), nil
 		}
 	case reflect.Map:
@@ -1179,7 +1214,7 @@ func resolveMethod(recv any, name string) (any, error) {
 		}
 	}
 	return nil, fmt.Errorf("%w: method %q not found on %T%s",
-		ErrEvaluate, name, recv, fieldHint(recv, name))
+		ErrEvaluate, name, recv, fieldHint(recv, name, fieldTags))
 }
 
 func methodCallable(name string, mv reflect.Value) Func {

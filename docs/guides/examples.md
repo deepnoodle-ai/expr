@@ -264,6 +264,30 @@ field, and a `Subtotal() float64` method. Field lookup beats method
 lookup: if the struct had both a `Meta` field and a `Meta()` method, the
 field wins.
 
+If your struct is the typed form of a JSON-shaped API contract, opt in to
+tag lookup and keep the expression in public-schema names:
+
+```go
+result.environment.status == "ready"
+```
+
+Where `result` is a struct value like:
+
+```go
+type Output struct {
+    Environment Environment `json:"environment"`
+}
+
+type Environment struct {
+    Status string `json:"status"`
+}
+
+p, err := expr.Compile(
+    `result.environment.status == "ready"`,
+    expr.WithStructTags("json"),
+)
+```
+
 ---
 
 ## 7. Role-based access control

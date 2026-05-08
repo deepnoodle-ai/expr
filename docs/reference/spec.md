@@ -154,6 +154,37 @@ Unexported struct fields are **not** reachable by name. Attempting to
 select one returns `ErrEvaluate: field ... not found` — we deliberately
 do not panic.
 
+Struct tags are ignored by default. Opt in with
+`expr.WithStructTags("expr", "json")` (or the alias `WithFieldTags`) to
+resolve exported struct fields by tag before Go field names. Tag names
+are tried in the order configured, and the first non-empty tag name wins
+for that field:
+
+```go
+type User struct {
+    DisplayName string `expr:"name" json:"display_name"`
+    Email       string `json:"email,omitempty"`
+    SourceID    string `json:",omitempty"`
+    Secret      string `expr:"-"`
+}
+
+p, _ := expr.Compile(`user.name == "Ada" && user.email != ""`,
+    expr.WithStructTags("expr", "json"))
+```
+
+Tag options after a comma are ignored, so `json:"email,omitempty"`
+resolves as `email`. An empty tag name such as `json:",omitempty"`
+falls back to the Go exported field name. `expr:"-"` hides the field
+entirely when the `expr` tag is configured. Other `"-"` tags only hide
+that tag lookup; lower-priority tags or the Go field name may still
+expose the field.
+
+Tag lookup uses strict precedence per field. In the example above,
+`user.name` resolves to `DisplayName`, while `user.display_name` and
+`user.DisplayName` do not. If two exported fields resolve to the same
+expression name, field access returns an `ErrEvaluate` ambiguity error
+rather than choosing one by declaration order.
+
 ## Selectors (`x.y`)
 
 `x.y` evaluates `x`, then looks up `y` on the result:
@@ -162,7 +193,8 @@ do not panic.
 - `map[string]any` or any map with string keys → `y` is a key. Missing
   keys return an error (not a zero value).
 - Map with non-string keys → `ErrEvaluate`.
-- Struct → the exported field `y`, or `ErrEvaluate` if missing.
+- Struct → the exported field `y`, using configured struct tags if any,
+  or `ErrEvaluate` if missing.
 - Pointer to struct → dereferenced and re-tried. Nil pointer →
   `ErrEvaluate`.
 - Anything else → `ErrEvaluate`.
@@ -208,7 +240,7 @@ Given `x.f()` where `x` evaluates to `recv`:
 2. Else, `reflect.Value.MethodByName("f")` on the pointer or original
    receiver (so pointer-receiver methods are visible).
 3. Else, if the dereferenced kind is `Struct`, the exported field `f`
-   (as a function value).
+   (as a function value), using configured struct tags if any.
 4. Else, if the dereferenced kind is a `Map` with string keys, the entry
    `recv["f"]`.
 5. Else: `ErrEvaluate: method ... not found`.
@@ -265,6 +297,10 @@ Options apply in order, so a later `WithFunctions` wins over an earlier
 `WithBuiltins` for any shared name. The same options passed to `Compile`
 are baked into the returned `*Program`, so `Run` needs no further
 configuration.
+
+`WithStructTags("expr", "json")` / `WithFieldTags(...)` controls struct
+field names only. It does not change map key lookup, method names, or
+registered function names.
 
 The standard set is:
 
