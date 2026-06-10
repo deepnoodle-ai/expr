@@ -570,6 +570,71 @@ func (p *Program) evalBinary(ctx context.Context, n *ast.BinaryExpr, env any, de
 }
 
 func applyBinary(op token.Token, lhs, rhs any) (any, error) {
+	// Fast path: exact int64/int/float64/string/bool operand pairs cover
+	// the vast majority of expressions and skip the reflect-based
+	// coercion helpers below. Unsupported operators fall through so the
+	// general path produces its usual error (with the original types).
+	switch l := lhs.(type) {
+	case int64:
+		switch r := rhs.(type) {
+		case int64:
+			if v, err, ok := applyInt64Binary(op, l, r); ok {
+				return v, err
+			}
+		case int:
+			if v, err, ok := applyInt64Binary(op, l, int64(r)); ok {
+				return v, err
+			}
+		case float64:
+			if v, err, ok := applyFloat64Binary(op, float64(l), r); ok {
+				return v, err
+			}
+		}
+	case int:
+		switch r := rhs.(type) {
+		case int64:
+			if v, err, ok := applyInt64Binary(op, int64(l), r); ok {
+				return v, err
+			}
+		case int:
+			if v, err, ok := applyInt64Binary(op, int64(l), int64(r)); ok {
+				return v, err
+			}
+		case float64:
+			if v, err, ok := applyFloat64Binary(op, float64(l), r); ok {
+				return v, err
+			}
+		}
+	case float64:
+		switch r := rhs.(type) {
+		case int64:
+			if v, err, ok := applyFloat64Binary(op, l, float64(r)); ok {
+				return v, err
+			}
+		case int:
+			if v, err, ok := applyFloat64Binary(op, l, float64(r)); ok {
+				return v, err
+			}
+		case float64:
+			if v, err, ok := applyFloat64Binary(op, l, r); ok {
+				return v, err
+			}
+		}
+	case string:
+		if r, ok := rhs.(string); ok {
+			return applyStringBinary(op, l, r)
+		}
+	case bool:
+		if r, ok := rhs.(bool); ok {
+			switch op {
+			case token.EQL:
+				return l == r, nil
+			case token.NEQ:
+				return l != r, nil
+			}
+		}
+	}
+
 	// String concatenation and comparison.
 	if ls, lok := asString(lhs); lok {
 		if rs, rok := asString(rhs); rok {
@@ -664,6 +729,93 @@ func applyBinary(op token.Token, lhs, rhs any) (any, error) {
 	}
 
 	return nil, fmt.Errorf("%w: operator %v not supported for %T and %T", ErrEvaluate, op, lhs, rhs)
+}
+
+// applyInt64Binary handles a binary op on two integral operands. ok is
+// false for operators the numeric paths do not support, so the caller
+// can fall through to the general path. Equality intentionally compares
+// as float64 to match looseEqual, which the general path consults before
+// its integer branch.
+func applyInt64Binary(op token.Token, l, r int64) (any, error, bool) {
+	switch op {
+	case token.EQL:
+		return float64(l) == float64(r), nil, true
+	case token.NEQ:
+		return float64(l) != float64(r), nil, true
+	case token.ADD:
+		if v, ok := checkedAddInt64(l, r); ok {
+			return v, nil, true
+		}
+		return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate), true
+	case token.SUB:
+		if v, ok := checkedSubInt64(l, r); ok {
+			return v, nil, true
+		}
+		return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate), true
+	case token.MUL:
+		if v, ok := checkedMulInt64(l, r); ok {
+			return v, nil, true
+		}
+		return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate), true
+	case token.QUO:
+		if r == 0 {
+			return nil, fmt.Errorf("%w: division by zero", ErrEvaluate), true
+		}
+		if l == math.MinInt64 && r == -1 {
+			return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate), true
+		}
+		return l / r, nil, true
+	case token.REM:
+		if r == 0 {
+			return nil, fmt.Errorf("%w: modulo by zero", ErrEvaluate), true
+		}
+		return l % r, nil, true
+	case token.LSS:
+		return l < r, nil, true
+	case token.GTR:
+		return l > r, nil, true
+	case token.LEQ:
+		return l <= r, nil, true
+	case token.GEQ:
+		return l >= r, nil, true
+	}
+	return nil, nil, false
+}
+
+// applyFloat64Binary mirrors the general path's float branch, with
+// equality matching looseEqual's cross-numeric comparison.
+func applyFloat64Binary(op token.Token, l, r float64) (any, error, bool) {
+	switch op {
+	case token.EQL:
+		return l == r, nil, true
+	case token.NEQ:
+		return l != r, nil, true
+	case token.ADD:
+		return l + r, nil, true
+	case token.SUB:
+		return l - r, nil, true
+	case token.MUL:
+		return l * r, nil, true
+	case token.QUO:
+		if r == 0 {
+			return nil, fmt.Errorf("%w: division by zero", ErrEvaluate), true
+		}
+		return l / r, nil, true
+	case token.REM:
+		if r == 0 {
+			return nil, fmt.Errorf("%w: modulo by zero", ErrEvaluate), true
+		}
+		return math.Mod(l, r), nil, true
+	case token.LSS:
+		return l < r, nil, true
+	case token.GTR:
+		return l > r, nil, true
+	case token.LEQ:
+		return l <= r, nil, true
+	case token.GEQ:
+		return l >= r, nil, true
+	}
+	return nil, nil, false
 }
 
 func applyStringBinary(op token.Token, lhs, rhs string) (any, error) {
@@ -944,6 +1096,9 @@ func (p *Program) evalIndex(ctx context.Context, n *ast.IndexExpr, env any, dept
 	if v, ok, err := p.tryFilterIndex(ctx, n, env, depth); ok {
 		return v, err
 	}
+	if v, ok, err := p.evalIndexChainRV(ctx, n, env, depth); ok {
+		return v, err
+	}
 	recv, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
 		return nil, err
@@ -953,6 +1108,169 @@ func (p *Program) evalIndex(ctx context.Context, n *ast.IndexExpr, env any, dept
 		return nil, err
 	}
 	return indexValue(recv, idx)
+}
+
+// indexChainStep is one hop of an ident-rooted index/selector chain:
+// either a field/key selection (sel) or an index whose operand is
+// evaluated lazily (idx).
+type indexChainStep struct {
+	sel string
+	idx ast.Expr
+}
+
+// evalIndexChainRV walks an ident-rooted chain of index and selector
+// hops (a[0][1], a.b[i].c[0], ...) in reflect space, materializing only
+// the leaf via Interface(). The general path boxes every intermediate
+// result through any, which copies aggregate data — indexing into a
+// struct holding a 10 MiB array memcpy's the array on each access. ok
+// is true when the fast path was taken (regardless of error); when
+// false the caller must use the general path, which also owns the
+// unknown-identifier error so suggestions stay consistent.
+func (p *Program) evalIndexChainRV(ctx context.Context, n *ast.IndexExpr, env any, depth int) (any, bool, error) {
+	// A single hop on a map env gains nothing: the value is already
+	// boxed behind any, so the typed lookup in the general path is
+	// faster than going through reflect here. Checked before the chain
+	// walk so the common arr[i] shape skips it entirely.
+	if _, isIdent := n.X.(*ast.Ident); isIdent {
+		if _, isMap := env.(map[string]any); isMap {
+			return nil, false, nil
+		}
+	}
+	// Collect hops leaf-first and find the root.
+	var steps []indexChainStep
+	cur := ast.Expr(n)
+walk:
+	for {
+		switch s := cur.(type) {
+		case *ast.IndexExpr:
+			steps = append(steps, indexChainStep{idx: s.Index})
+			cur = s.X
+		case *ast.SelectorExpr:
+			steps = append(steps, indexChainStep{sel: s.Sel.Name})
+			cur = s.X
+		default:
+			break walk
+		}
+	}
+	ident, ok := cur.(*ast.Ident)
+	if !ok {
+		return nil, false, nil
+	}
+	switch ident.Name {
+	case "true", "false", "nil":
+		return nil, false, nil
+	}
+	if depth+len(steps) > MaxEvalDepth {
+		return nil, true, fmt.Errorf("%w: expression nested too deeply (limit %d)", ErrEvaluate, MaxEvalDepth)
+	}
+	rv, ok, err := lookupEnvRV(env, ident.Name, p.fieldTags)
+	if err != nil {
+		return nil, true, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	for i := len(steps) - 1; i >= 0; i-- {
+		step := steps[i]
+		if step.idx == nil {
+			next, err := selectFieldRV(rv, displayIdent(step.sel), p.fieldTags)
+			if err != nil {
+				return nil, true, err
+			}
+			rv = next
+			continue
+		}
+		idx, err := p.eval(ctx, step.idx, env, depth)
+		if err != nil {
+			return nil, true, err
+		}
+		next, err := indexValueRV(rv, idx)
+		if err != nil {
+			return nil, true, err
+		}
+		rv = next
+	}
+	if !rv.IsValid() {
+		return nil, true, nil
+	}
+	if !rv.CanInterface() {
+		return nil, true, fmt.Errorf("%w: value not accessible", ErrEvaluate)
+	}
+	return rv.Interface(), true, nil
+}
+
+// mapStringAnyType lets indexValueRV mirror indexValue's dedicated
+// map[string]any branch, keeping error messages identical between the
+// fast and general index paths.
+var mapStringAnyType = reflect.TypeOf(map[string]any(nil))
+
+// indexValueRV mirrors indexValue but keeps the receiver in reflect
+// space so intermediate hops of a chain are never boxed through any.
+func indexValueRV(rv reflect.Value, idx any) (reflect.Value, error) {
+	for rv.Kind() == reflect.Interface && !rv.IsNil() {
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() || (rv.Kind() == reflect.Interface && rv.IsNil()) {
+		return reflect.Value{}, fmt.Errorf("%w: cannot index nil", ErrEvaluate)
+	}
+	if rv.Type() == mapStringAnyType {
+		key, ok := idx.(string)
+		if !ok {
+			return reflect.Value{}, fmt.Errorf("%w: map index must be string, got %T", ErrEvaluate, idx)
+		}
+		mv := rv.MapIndex(reflect.ValueOf(key))
+		if !mv.IsValid() {
+			return reflect.Value{}, fmt.Errorf("%w: key %q not found%s",
+				ErrEvaluate, key, fieldHint(rv.Interface(), key, nil))
+		}
+		return mv, nil
+	}
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		i, err := toIndexInt(idx)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if i < 0 || i >= int64(rv.Len()) {
+			return reflect.Value{}, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, rv.Len())
+		}
+		return rv.Index(int(i)), nil
+	case reflect.String:
+		i, err := toIndexInt(idx)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		runes := []rune(rv.String())
+		if i < 0 || i >= int64(len(runes)) {
+			return reflect.Value{}, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, len(runes))
+		}
+		return reflect.ValueOf(string(runes[i])), nil
+	case reflect.Map:
+		keyType := rv.Type().Key()
+		if idx == nil {
+			return reflect.Value{}, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
+		}
+		kv := reflect.ValueOf(idx)
+		if !kv.Type().AssignableTo(keyType) {
+			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
+				converted, err := safeNumericConvert(kv, keyType)
+				if err != nil {
+					return reflect.Value{}, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
+				}
+				kv = converted
+			} else if kv.Type().ConvertibleTo(keyType) {
+				kv = kv.Convert(keyType)
+			} else {
+				return reflect.Value{}, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
+			}
+		}
+		mv := rv.MapIndex(kv)
+		if !mv.IsValid() {
+			return reflect.Value{}, fmt.Errorf("%w: key %v not found", ErrEvaluate, idx)
+		}
+		return mv, nil
+	}
+	return reflect.Value{}, fmt.Errorf("%w: cannot index %v", ErrEvaluate, rv.Type())
 }
 
 // tryFilterIndex recognises `filter(xs, predicate)[N]` where N is a

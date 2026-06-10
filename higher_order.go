@@ -101,32 +101,44 @@ func init() {
 	higherOrderForms[tryIndexFormName] = formTryIndex
 }
 
-// iterItems evaluates collExpr and converts the result to a []any for
+// itemSeq is an indexable view over a list-shaped collection. Typed
+// slices stay behind a reflect.Value and box elements lazily in at(),
+// so forms never materialize an intermediate []any just to iterate.
+type itemSeq struct {
+	items []any         // set when the collection already is a []any
+	rv    reflect.Value // used otherwise (typed slices and arrays)
+	n     int
+}
+
+func (s itemSeq) at(i int) any {
+	if s.items != nil {
+		return s.items[i]
+	}
+	return s.rv.Index(i).Interface()
+}
+
+// iterItems evaluates collExpr and wraps the result in an itemSeq for
 // predicate iteration. nil is treated as an empty list so
 // `map(nil, it)` / `filter(nil, it > 0)` return empty without error.
 // Maps and other non-list shapes return a user-friendly error naming
 // the form, so users do not have to guess which argument was wrong.
-func (p *Program) iterItems(ctx context.Context, name string, collExpr ast.Expr, env any, depth int) ([]any, error) {
+func (p *Program) iterItems(ctx context.Context, name string, collExpr ast.Expr, env any, depth int) (itemSeq, error) {
 	coll, err := p.eval(ctx, collExpr, env, depth)
 	if err != nil {
-		return nil, err
+		return itemSeq{}, err
 	}
 	if coll == nil {
-		return nil, nil
+		return itemSeq{}, nil
 	}
 	if s, ok := coll.([]any); ok {
-		return s, nil
+		return itemSeq{items: s, n: len(s)}, nil
 	}
 	rv := reflect.ValueOf(coll)
 	switch rv.Kind() {
 	case reflect.Slice, reflect.Array:
-		out := make([]any, rv.Len())
-		for i := 0; i < rv.Len(); i++ {
-			out[i] = rv.Index(i).Interface()
-		}
-		return out, nil
+		return itemSeq{rv: rv, n: rv.Len()}, nil
 	}
-	return nil, fmt.Errorf("%w: %s expects a list as its first argument, got %T",
+	return itemSeq{}, fmt.Errorf("%w: %s expects a list as its first argument, got %T",
 		ErrEvaluate, name, coll)
 }
 
@@ -152,14 +164,15 @@ func checkFormArity(name string, got int) error {
 func (p *Program) forEach(
 	ctx context.Context,
 	name string,
-	items []any,
+	items itemSeq,
 	predicate ast.Expr,
 	env any,
 	depth int,
 	body func(item any, result any) (stop bool, err error),
 ) error {
 	scope := &itEnv{parent: env}
-	for i, item := range items {
+	for i := 0; i < items.n; i++ {
+		item := items.at(i)
 		scope.it = item
 		scope.index = int64(i)
 		v, err := p.eval(ctx, predicate, scope, depth)
@@ -361,7 +374,7 @@ func formMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(items))
+	out := make([]any, 0, items.n)
 	err = p.forEach(ctx, "map", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
 		out = append(out, v)
 		return false, nil
@@ -380,7 +393,7 @@ func formFilter(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(items))
+	out := make([]any, 0, items.n)
 	err = p.forEach(ctx, "filter", items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
 		if isTruthy(v) {
 			out = append(out, item)
