@@ -37,6 +37,10 @@ func TestValidate_RejectsAtCompile(t *testing.T) {
 
 		// Calls
 		{"spread", "f(xs...)", "spread"},
+		{"call_target_index", "fns[0]()", "call target"},
+		{"call_target_paren", "(f)(1)", "call target"},
+		{"call_target_call", "f()(1)", "call target"},
+		{"call_target_optional", "a?.b()", "optional access"},
 
 		// Compound expression nodes
 		{"slice_expr", "a[1:2]", "slice expression"},

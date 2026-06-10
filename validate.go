@@ -64,6 +64,9 @@ func validate(fset *token.FileSet, node ast.Expr) error {
 		if n.Ellipsis != token.NoPos {
 			return validateErr(fset, n.Ellipsis, "spread call arguments (...) are not supported")
 		}
+		if err := validateCallTarget(fset, n.Fun); err != nil {
+			return err
+		}
 		if err := validate(fset, n.Fun); err != nil {
 			return err
 		}
@@ -104,6 +107,32 @@ func validate(fset *token.FileSet, node ast.Expr) error {
 		return validateErr(fset, n.Lbrack, "generic type instantiation is not supported")
 	}
 	return validateErr(fset, node.Pos(), "unsupported syntax %T", node)
+}
+
+// validateCallTarget rejects call targets the evaluator cannot
+// resolve. resolveCallable supports bare identifiers and selector
+// expressions; anything else (an index expression, a parenthesized
+// callee, the result of another call) would fail at Run time with
+// "unsupported call target", so surface it at Compile time instead.
+// Calls on optional-access results get a tailored message because
+// the sentinel call the rewrite produced would otherwise leak into
+// a confusing generic error.
+func validateCallTarget(fset *token.FileSet, fun ast.Expr) error {
+	switch f := fun.(type) {
+	case *ast.Ident, *ast.SelectorExpr:
+		return nil
+	case *ast.CallExpr:
+		if id, ok := f.Fun.(*ast.Ident); ok {
+			switch id.Name {
+			case trySelectFormName:
+				return validateErr(fset, fun.Pos(), "cannot call the result of optional access (a?.b())")
+			case tryIndexFormName:
+				return validateErr(fset, fun.Pos(), "cannot call the result of optional access (a?[i]())")
+			}
+		}
+		return validateErr(fset, fun.Pos(), "call target must be a function name or selector, not a call result")
+	}
+	return validateErr(fset, fun.Pos(), "call target must be a function name or selector")
 }
 
 // validateCompositeType mirrors the runtime check in evalCompositeLit
