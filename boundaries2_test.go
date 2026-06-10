@@ -373,17 +373,26 @@ func TestAdversarial_AnyNilFunctionViaSelector(t *testing.T) {
 // --- 17. Constant-folded MinInt64 negation ---
 
 func TestAdversarial_FoldedNegMinInt(t *testing.T) {
-	// At compile time, the parser yields a UnaryExpr SUB of a literal
-	// 9223372036854775808 — which is too big for int64. Compile should
-	// surface the literal-out-of-range error or correctly produce
-	// MinInt64. Should not panic.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("compile -9223372036854775808 panicked: %v", r)
-		}
-	}()
-	v, err := evalExpr(t.Context(), "-9223372036854775808", nil)
-	t.Logf("-9223372036854775808 => %v, err=%v", v, err)
+	// The parser yields a UnaryExpr SUB of a literal
+	// 9223372036854775808 — which is too big for int64 on its own.
+	// The fold pass reads the negation as a single signed literal, so
+	// MinInt64 is representable the way users write it.
+	cases := []struct {
+		expr string
+		want int64
+	}{
+		{"-9223372036854775808", math.MinInt64},
+		{"-0x8000000000000000", math.MinInt64},
+		{"-9223372036854775808 + 1", math.MinInt64 + 1},
+	}
+	for _, tc := range cases {
+		v, err := evalExpr(t.Context(), tc.expr, nil)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, v)
+	}
+	// One past MinInt64 is still out of range and must error, not wrap.
+	_, err := evalExpr(t.Context(), "-9223372036854775809", nil)
+	require.ErrorIs(t, err, ErrEvaluate)
 }
 
 // --- 18. Self-referential map via env doesn't infinite loop in keys() ---
@@ -454,11 +463,9 @@ func TestAdversarial_MulOverflow(t *testing.T) {
 		"a": int64(math.MaxInt64),
 		"b": int64(2),
 	}
-	got, err := evalExpr(t.Context(), "a * b", env)
-	t.Logf("MaxInt64 * 2 => %v, err=%v", got, err)
-	if err == nil && got == int64(-2) {
-		t.Logf("CONFIRMED: silent integer overflow on multiply")
-	}
+	_, err := evalExpr(t.Context(), "a * b", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "integer overflow")
 }
 
 // --- 24. Addition overflow ---
@@ -468,11 +475,9 @@ func TestAdversarial_AddOverflow(t *testing.T) {
 		"a": int64(math.MaxInt64),
 		"b": int64(1),
 	}
-	got, err := evalExpr(t.Context(), "a + b", env)
-	t.Logf("MaxInt64 + 1 => %v, err=%v", got, err)
-	if err == nil && got == int64(math.MinInt64) {
-		t.Logf("CONFIRMED: silent integer overflow on add")
-	}
+	_, err := evalExpr(t.Context(), "a + b", env)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "integer overflow")
 }
 
 // --- 25. Method-value invocation panic from nil pointer with pointer receiver ---
