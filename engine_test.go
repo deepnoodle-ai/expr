@@ -414,10 +414,10 @@ func TestCompile_SyntaxError(t *testing.T) {
 
 func TestEval_UnsupportedSyntax(t *testing.T) {
 	cases := []string{
-		"state.items[1:3]",    // slice expression
-		"x.(int)",             // type assertion
-		"func() int { 1 }()",  // function literal
-		"[]int{1, 2, 3}",      // composite literal
+		"state.items[1:3]",   // slice expression
+		"x.(int)",            // type assertion
+		"func() int { 1 }()", // function literal
+		"[]int{1, 2, 3}",     // composite literal
 	}
 	for _, expr := range cases {
 		t.Run(expr, func(t *testing.T) {
@@ -455,7 +455,7 @@ func TestEval_EnvCallable(t *testing.T) {
 	env := map[string]any{
 		"name":  "ada",
 		"upper": strings.ToUpper,
-		"addN": func(n, m int) int { return n + m },
+		"addN":  func(n, m int) int { return n + m },
 		"greet": func(who string) (string, error) {
 			if who == "" {
 				return "", errors.New("empty name")

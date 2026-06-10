@@ -128,9 +128,9 @@ func (v guideOrderView) Subtotal() float64 { return v.subtotal }
 
 func TestGuide_DesigningEnv_PointerStruct(t *testing.T) {
 	o := &guideOrder{
-		ID: "A-1",
+		ID:    "A-1",
 		Items: []guideLineItem{{SKU: "a", Price: 60}, {SKU: "b", Price: 80}},
-		Meta: map[string]any{"source": "web"},
+		Meta:  map[string]any{"source": "web"},
 	}
 	src := `Subtotal() > 100 && len(Items) >= 2 && !has(Meta, "refunded")`
 	got := runGuide(t, src, o)
@@ -410,4 +410,75 @@ func TestGuide_HigherOrder_EmptyListSemantics(t *testing.T) {
 			t.Errorf("%s: got %#v want %#v", c.src, got, c.want)
 		}
 	}
+}
+
+func TestGuide_Sandboxing_EvalBudget(t *testing.T) {
+	// The guide claims WithEvalBudget fails hostile nesting
+	// deterministically and immediately, not at the deadline.
+	p, err := Compile(`map(xs, map(xs, map(xs, it)))`, WithBuiltins(), WithEvalBudget(100_000))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	xs := make([]any, 10_000)
+	for i := range xs {
+		xs[i] = int64(i)
+	}
+	_, err = p.Run(context.Background(), map[string]any{"xs": xs})
+	if !errors.Is(err, ErrEvaluate) {
+		t.Fatalf("expected ErrEvaluate, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "evaluation budget exceeded") {
+		t.Fatalf("expected budget error, got %v", err)
+	}
+}
+
+func TestGuide_Templates_LazyIfGuard(t *testing.T) {
+	// templates.md claims `${if(n != 0, total/n, 0)}` is safe when n
+	// is zero because only the selected branch evaluates.
+	tpl, err := NewTemplate(`${if(n != 0, total/n, 0)}`, WithBuiltins())
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	out, err := tpl.Render(context.Background(), map[string]any{"n": int64(0), "total": int64(10)})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	assertDeepEqual(t, out, "0")
+}
+
+func TestGuide_RegisteringFunctions_CompileTimeValidation(t *testing.T) {
+	// registering-functions.md claims invalid registrations fail
+	// Compile with ErrCompile rather than erroring at call time.
+	_, err := Compile(`bad()`, WithFunctions(map[string]any{
+		"bad": func() (int, string) { return 1, "x" },
+	}))
+	if !errors.Is(err, ErrCompile) {
+		t.Fatalf("expected ErrCompile, got %v", err)
+	}
+}
+
+func TestGuide_RegisteringFunctions_HelperGroups(t *testing.T) {
+	// The opt-in groups snippet from registering-functions.md.
+	p, err := Compile(`join(map(split(trim("  a,b,c  "), ","), upper(it)), "-")`,
+		WithBuiltins(),
+		WithFunctions(MathFuncs()),
+		WithFunctions(StringFuncs()),
+		WithFunctions(CollectionFuncs()),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	got, err := p.Run(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	assertDeepEqual(t, got, "A-B-C")
+}
+
+func TestGuide_HigherOrder_LazyIf(t *testing.T) {
+	// higher-order-patterns.md claims only the selected branch of
+	// if(cond, t, f) evaluates.
+	env := map[string]any{"xs": []any{int64(1)}}
+	got := runGuide(t, `if(len(xs) > 5, xs[5], "small")`, env)
+	assertDeepEqual(t, got, "small")
 }

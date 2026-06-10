@@ -59,9 +59,11 @@ in its output. If you need to, emit a sentinel in the expression:
 Nickname: ${if(user.nickname == nil, "(none)", user.nickname)}
 ```
 
-`if(cond, t, f)` is the canonical ternary in expr. Both branches
-evaluate eagerly, so reach for `try(...)` or operand-returning
-`||` when you need to dodge a runtime error in one branch.
+`if(cond, t, f)` is the canonical ternary in expr. It is lazy —
+only the branch the condition selects evaluates — so guards like
+`${if(n != 0, total/n, 0)}` are safe. `try(...)` and
+operand-returning `||` remain useful when the *condition itself*
+might error.
 
 ## The list-stringification footgun
 

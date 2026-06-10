@@ -45,17 +45,17 @@ type preparedFunc struct {
 // function's reflect metadata is cached for the fallback path.
 func prepareFunc(name string, fn any) (*preparedFunc, error) {
 	if fn == nil {
-		return nil, fmt.Errorf("expr: function %q is nil", name)
+		return nil, fmt.Errorf("function %q is nil", name)
 	}
 	if nf, ok := fn.(Func); ok {
 		return &preparedFunc{name: name, native: nf}, nil
 	}
 	fv := reflect.ValueOf(fn)
 	if fv.Kind() != reflect.Func {
-		return nil, fmt.Errorf("expr: function %q is not a function (got %T)", name, fn)
+		return nil, fmt.Errorf("function %q is not a function (got %T)", name, fn)
 	}
 	if fv.IsNil() {
-		return nil, fmt.Errorf("expr: function %q is a nil function value", name)
+		return nil, fmt.Errorf("function %q is a nil function value", name)
 	}
 	ft := fv.Type()
 	p := &preparedFunc{
@@ -82,11 +82,11 @@ func prepareFunc(name string, fn any) (*preparedFunc, error) {
 	if p.numOut == 2 {
 		errType := reflect.TypeOf((*error)(nil)).Elem()
 		if !ft.Out(1).Implements(errType) {
-			return nil, fmt.Errorf("expr: function %q: second return must be error, got %v", name, ft.Out(1))
+			return nil, fmt.Errorf("function %q: second return must be error, got %v", name, ft.Out(1))
 		}
 		p.hasErrRet = true
 	} else if p.numOut > 2 {
-		return nil, fmt.Errorf("expr: function %q returns %d values (expected 0, 1, or (T, error))", name, p.numOut)
+		return nil, fmt.Errorf("function %q returns %d values (expected 0, 1, or (T, error))", name, p.numOut)
 	}
 	return p, nil
 }
@@ -139,7 +139,10 @@ func callPreparedReflect(ctx context.Context, pf *preparedFunc, args []any) (any
 		}
 	}
 
-	out := pf.fv.Call(in)
+	out, err := callReflectRecoverRuntime(pf.name, pf.fv, in)
+	if err != nil {
+		return nil, err
+	}
 	switch pf.numOut {
 	case 0:
 		return nil, nil

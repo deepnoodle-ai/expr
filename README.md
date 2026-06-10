@@ -102,7 +102,11 @@ p, err := expr.Compile(`greet(upper(name))`, expr.WithFunctions(map[string]any{
 ```
 
 Mix and match, or skip the builtins entirely and expose only the handful that
-make sense for your sandbox.
+make sense for your sandbox. Opt-in groups — `expr.MathFuncs()` (`min`, `max`,
+`abs`, `floor`, `ceil`, `round`), `expr.StringFuncs()` (`trim`, `split`,
+`join`, `replace`, `startsWith`, `endsWith`), and `expr.CollectionFuncs()`
+(`first`, `last`, `sum`, `slice`) — add the usual helpers via `WithFunctions`
+without widening the default set.
 
 ## What the environment can be
 
@@ -148,9 +152,13 @@ p, err := expr.Compile(`filter(users, it.age >= 18 && index < 10)`)
 ```
 
 The predicate is re-evaluated per element, so they compose naturally:
-`any(orders, count(it.items, it.price > 100) > 0)`. These forms are always
-registered (no `WithBuiltins` needed), but you can shadow any of them by
-registering a function or env value of the same name.
+`any(orders, count(it.items, it.price > 100) > 0)`. Two more special forms
+use laziness for control flow instead of iteration: `try(value, default)`
+falls back when `value` errors, and `if(cond, then, else)` evaluates only the
+branch the condition selects — so `if(n != 0, total/n, 0)` can't divide by
+zero. These forms are always registered (no `WithBuiltins` needed), but you
+can shadow any of them by registering a function or env value of the same
+name.
 
 ## What it isn't
 

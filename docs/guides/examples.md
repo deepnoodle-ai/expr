@@ -398,3 +398,49 @@ Env is a typical webhook payload: a `request` map with `method`,
 `headers`, and `body` keys. This kind of expression is exactly what
 `expr` is built for — authorization and routing rules that you want your
 operators to edit without redeploying the host program.
+
+---
+
+## 10. Guarded math and the opt-in helper groups
+
+`if(cond, then, else)` is lazy — only the selected branch evaluates —
+so it doubles as a guard: dividing by a count that might be zero,
+selecting into a list that might be empty. Combined with the opt-in
+helper groups (`expr.MathFuncs()`, `expr.StringFuncs()`,
+`expr.CollectionFuncs()`), per-order stats stay in the expression
+instead of leaking into Go:
+
+```go
+{
+    "avg_price":  if(len(prices) > 0, sum(prices) / len(prices), 0),
+    "spread":     if(len(prices) > 0, max(0, last(prices) - first(prices)), 0),
+    "top_three":  slice(prices, 0, 3),
+    "sku_list":   join(map(items, upper(it.sku)), ", "),
+}
+```
+
+Env:
+
+```go
+map[string]any{
+    "prices": []any{int64(10), int64(20), int64(60)},
+    "items": []any{
+        map[string]any{"sku": "a-1"},
+        map[string]any{"sku": "b-2"},
+    },
+}
+```
+
+Compile with the groups registered alongside the standard builtins:
+
+```go
+p, err := expr.Compile(src,
+    expr.WithBuiltins(),
+    expr.WithFunctions(expr.MathFuncs()),
+    expr.WithFunctions(expr.StringFuncs()),
+    expr.WithFunctions(expr.CollectionFuncs()),
+)
+```
+
+With an empty `prices` list, `avg_price` is `0` rather than a
+division-by-zero error — the untaken branch never runs.

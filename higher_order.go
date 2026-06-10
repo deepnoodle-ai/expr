@@ -46,7 +46,10 @@ type userForm struct {
 	// callHint is the signature shown in the "is a special form"
 	// suggester message, e.g. `map(xs, predicate)`.
 	callHint string
-	fn       higherOrderForm
+	// bindsIt marks the iterating forms, which bind `it`/`index`
+	// inside their second argument. Drives the identifier collector.
+	bindsIt bool
+	fn      higherOrderForm
 }
 
 // userForms enumerates every user-visible special form. Order is
@@ -68,19 +71,28 @@ var userForms []userForm
 // expr. See the dispatch in evalCall.
 var higherOrderForms map[string]higherOrderForm
 
+// itBindingForms holds the dispatch keys of the forms that bind
+// `it`/`index` in their second argument, derived from userForms.
+var itBindingForms map[string]bool
+
 func init() {
 	userForms = []userForm{
-		{name: "map", internal: mapFormName, callHint: "map(xs, predicate)", fn: formMap},
-		{name: "filter", internal: "filter", callHint: "filter(xs, predicate)", fn: formFilter},
-		{name: "any", internal: "any", callHint: "any(xs, predicate)", fn: formAny},
-		{name: "all", internal: "all", callHint: "all(xs, predicate)", fn: formAll},
-		{name: "find", internal: "find", callHint: "find(xs, predicate)", fn: formFind},
-		{name: "count", internal: "count", callHint: "count(xs, predicate)", fn: formCount},
+		{name: "map", internal: mapFormName, callHint: "map(xs, predicate)", bindsIt: true, fn: formMap},
+		{name: "filter", internal: "filter", callHint: "filter(xs, predicate)", bindsIt: true, fn: formFilter},
+		{name: "any", internal: "any", callHint: "any(xs, predicate)", bindsIt: true, fn: formAny},
+		{name: "all", internal: "all", callHint: "all(xs, predicate)", bindsIt: true, fn: formAll},
+		{name: "find", internal: "find", callHint: "find(xs, predicate)", bindsIt: true, fn: formFind},
+		{name: "count", internal: "count", callHint: "count(xs, predicate)", bindsIt: true, fn: formCount},
 		{name: "try", internal: "try", callHint: "try(value, default)", fn: formTry},
+		{name: "if", internal: ifFuncName, callHint: "if(cond, then, else)", fn: formIf},
 	}
 	higherOrderForms = make(map[string]higherOrderForm, len(userForms)+2)
+	itBindingForms = make(map[string]bool, len(userForms))
 	for _, f := range userForms {
 		higherOrderForms[f.internal] = f.fn
+		if f.bindsIt {
+			itBindingForms[f.internal] = true
+		}
 	}
 	// Sentinel forms emitted by the optaccess pre-parse rewrite.
 	// Users do not type these names; they appear only as the
@@ -635,6 +647,30 @@ func tryIndexValue(recv, idx any) (any, error) {
 		return mv.Interface(), nil
 	}
 	return nil, fmt.Errorf("%w: cannot index %T", ErrEvaluate, recv)
+}
+
+// formIf implements `if(cond, then, else)` as a lazy special form:
+// only the branch selected by the condition's truthiness is
+// evaluated, so the guard idiom `if(n != 0, total/n, 0)` works
+// without tripping over the untaken branch. `if` binds no implicit
+// `it`/`index`; all three arguments see the enclosing scope.
+//
+// Like every special form it can be shadowed: a function registered
+// under "if" or an env entry of that name wins, restoring eager
+// argument evaluation through the normal call path.
+func formIf(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	if len(n.Args) != 3 {
+		return nil, fmt.Errorf("%w: if expects 3 arguments (cond, then, else), got %d",
+			ErrEvaluate, len(n.Args))
+	}
+	cond, err := p.eval(ctx, n.Args[0], env, depth)
+	if err != nil {
+		return nil, err
+	}
+	if isTruthy(cond) {
+		return p.eval(ctx, n.Args[1], env, depth)
+	}
+	return p.eval(ctx, n.Args[2], env, depth)
 }
 
 // formTry implements `try(value, default)`. It evaluates the first

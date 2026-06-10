@@ -18,11 +18,13 @@ parameter interpolation.
 
 | File                | Purpose                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| `engine.go`         | `Compile`, `Option`, `map` keyword preprocessing                   |
+| `engine.go`         | `Compile`, `Option`, `map`/`if` keyword preprocessing              |
 | `program.go`        | AST walker — the evaluator                                         |
 | `reflect.go` + `prepared.go` | Env lookup, function dispatch, cached signatures          |
 | `builtins.go`       | Default function set exposed by `Builtins()` / `WithBuiltins()`    |
-| `higher_order.go`   | `map`, `filter`, `any`, `all`, `find`, `count` special forms       |
+| `builtin_groups.go` | Opt-in `MathFuncs()` / `StringFuncs()` / `CollectionFuncs()` sets  |
+| `higher_order.go`   | `map`, `filter`, `any`, `all`, `find`, `count`, `try`, `if` forms  |
+| `identifiers.go`    | `Program.Identifiers()` — env-referenced name collection           |
 | `template.go`       | `${...}` interpolation via `NewTemplate` / `Render`                |
 | `truthy.go`         | `IsTruthy` rules used by `!`, `&&`, `\|\|`, `bool(v)`              |
 | `suggest.go`        | "Did you mean…" for unknown identifiers                            |

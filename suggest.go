@@ -55,7 +55,10 @@ func formatHint(name string, candidates []string) string {
 	if closest, ok := closestName(name, candidates); ok {
 		return fmt.Sprintf(" (did you mean %q?)", closest)
 	}
-	const maxList = 8
+	// The special forms alone contribute 8 names to the candidate
+	// set, so the cap must leave room for a few env entries on top or
+	// the list hint would never fire for small envs.
+	const maxList = 12
 	if len(candidates) > maxList {
 		return ""
 	}
