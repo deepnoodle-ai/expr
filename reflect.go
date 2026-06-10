@@ -35,19 +35,27 @@ func callFunction(ctx context.Context, name string, fn any, args []any) (any, er
 		return nil, err
 	}
 
-	return finishCall(name, ft, callReflect(fv, in))
+	out, err := callReflectRecoverRuntime(name, fv, in)
+	if err != nil {
+		return nil, err
+	}
+	return finishCall(name, ft, out)
 }
 
-func callReflect(fv reflect.Value, in []reflect.Value) []reflect.Value {
-	return fv.Call(in)
-}
-
+// callReflectRecoverRuntime invokes fv and converts runtime.Error
+// panics (nil deref, index out of range, ...) in the callee into an
+// ErrEvaluate so one buggy function cannot take down the host through
+// Run. Every reflect-based dispatch path — bound methods, env-stored
+// functions, and WithFunctions-registered functions — goes through
+// this wrapper. Deliberate panics with non-runtime values are
+// re-raised: those signal programmer intent that expr should not
+// swallow.
 func callReflectRecoverRuntime(name string, fv reflect.Value, in []reflect.Value) (out []reflect.Value, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(runtime.Error); ok {
 				out = nil
-				err = fmt.Errorf("%w: %q panicked during method dispatch: %v", ErrEvaluate, name, r)
+				err = fmt.Errorf("%w: %q panicked during call: %v", ErrEvaluate, name, r)
 				return
 			}
 			panic(r)

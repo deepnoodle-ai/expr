@@ -30,6 +30,18 @@ type Program struct {
 	// evalLiteral is a single map lookup instead of repeating
 	// strconv work on every Run.
 	litCache map[*ast.BasicLit]any
+
+	// identifiers is the sorted set of environment-resolved names the
+	// expression references, computed once during compile(). See
+	// Identifiers for the exact rules.
+	identifiers []string
+
+	// evalBudget is the per-Run node-evaluation limit configured via
+	// WithEvalBudget; 0 means unlimited. budgetLeft is nil on the
+	// shared Program — Run works on a shallow copy holding a fresh
+	// counter so concurrent Runs never share budget state.
+	evalBudget int
+	budgetLeft *int64
 }
 
 // compile walks the root AST once to populate the lookup caches used
@@ -40,6 +52,7 @@ func (p *Program) compile() {
 	p.callCache = map[*ast.CallExpr]*preparedFunc{}
 	p.litCache = map[*ast.BasicLit]any{}
 	p.root = p.prewalk(p.root)
+	p.identifiers = collectIdentifiers(p.root, p.funcs)
 }
 
 // constValue reports the pre-computed value of a folded/literal node,
@@ -260,6 +273,16 @@ func (p *Program) Run(ctx context.Context, env any) (any, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if p.evalBudget > 0 {
+		// Evaluate through a shallow copy carrying a fresh counter so
+		// the shared Program stays immutable and concurrent Runs each
+		// get the full budget. The copy shares the (read-only) AST
+		// and caches.
+		run := *p
+		left := int64(p.evalBudget)
+		run.budgetLeft = &left
+		return run.eval(ctx, run.root, env, 0)
+	}
 	return p.eval(ctx, p.root, env, 0)
 }
 
@@ -269,6 +292,12 @@ func (p *Program) eval(ctx context.Context, node ast.Expr, env any, depth int) (
 	}
 	if depth >= MaxEvalDepth {
 		return nil, fmt.Errorf("%w: expression nested too deeply (limit %d)", ErrEvaluate, MaxEvalDepth)
+	}
+	if p.budgetLeft != nil {
+		if *p.budgetLeft <= 0 {
+			return nil, fmt.Errorf("%w: evaluation budget exceeded (limit %d)", ErrEvaluate, p.evalBudget)
+		}
+		*p.budgetLeft--
 	}
 	depth++
 	switch n := node.(type) {
@@ -1092,33 +1121,25 @@ func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth 
 	// unevaluated so it can be re-run per element with `it`/`index`
 	// bound in an itEnv scope. Identifier shadowing follows the same
 	// env→funcs order used by resolveCallable, so users can always
-	// register their own `map` or `filter` if they prefer.
+	// register their own `map`, `filter`, or `if` if they prefer.
 	//
-	// `map` is special: the preprocessing pass rewrote its token to
-	// mapFormName so Go's parser would accept it, but shadowing
-	// checks still have to use the user-visible name "map" — a user
-	// who calls WithFunctions({"map": ...}) expects their function
-	// to win, and env entries named "map" should be honored too.
+	// Keyword-backed forms (`map`, `if`) dispatch on their internal
+	// sentinel name, but shadowing checks use the user-visible name
+	// via displayIdent — a user who calls WithFunctions({"map": ...})
+	// expects their function to win, and env entries named "map"
+	// should be honored too.
 	if ident, isIdent := n.Fun.(*ast.Ident); isIdent {
-		if ident.Name == mapFormName {
-			if v, ok, err := lookupEnv(env, "map", p.fieldTags); err != nil {
+		if form, isForm := higherOrderForms[ident.Name]; isForm {
+			name := displayIdent(ident.Name)
+			if v, ok, err := lookupEnv(env, name, p.fieldTags); err != nil {
 				return nil, err
 			} else if ok {
-				return p.callValue(ctx, "map", v, n.Args, env, depth)
+				return p.callValue(ctx, name, v, n.Args, env, depth)
 			}
-			if v, ok := p.funcs["map"]; ok {
-				return p.callValue(ctx, "map", v, n.Args, env, depth)
+			if v, ok := p.funcs[name]; ok {
+				return p.callValue(ctx, name, v, n.Args, env, depth)
 			}
-			return formMap(p, ctx, n, env, depth)
-		}
-		if form, isForm := higherOrderForms[ident.Name]; isForm {
-			if _, inEnv, err := lookupEnv(env, ident.Name, p.fieldTags); err != nil {
-				return nil, err
-			} else if !inEnv {
-				if _, inFuncs := p.funcs[ident.Name]; !inFuncs {
-					return form(p, ctx, n, env, depth)
-				}
-			}
+			return form(p, ctx, n, env, depth)
 		}
 	}
 

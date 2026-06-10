@@ -24,9 +24,11 @@ language reference is [`docs/reference/spec.md`](docs/reference/spec.md).
   no bytecode, no VM, no optimizer. This is deliberate — the whole
   library is ~3.9k non-test Go LOC.
 - **Safe by default.** `MaxSourceLength` (64 KiB) caps the parser;
-  `MaxEvalDepth` (256) caps the evaluator. Bitwise ops, pointer ops,
-  channel ops, spread args, type assertions, and function literals
-  are all rejected at eval time.
+  `MaxEvalDepth` (256) caps the evaluator; opt-in `WithEvalBudget(n)`
+  caps total nodes evaluated per Run so hostile nesting fails
+  deterministically. Bitwise ops, pointer ops, channel ops, spread
+  args, type assertions, and function literals are all rejected at
+  eval time.
 - **Loosely typed at runtime.** Integers are `int64`, floats are
   `float64`, numeric comparisons mix freely, and truthiness covers
   nil/false/zero/empty-string/empty-collection.
@@ -86,6 +88,11 @@ any shared name.
 | `expr.WithBuiltins()`                 | Registers the standard builtin function set (see below)   |
 | `expr.WithFunctions(map[string]any{})`| Registers arbitrary Go functions as callable identifiers   |
 | `expr.WithStructTags("json")`         | Opts struct field lookup into tag names before Go names    |
+| `expr.WithEvalBudget(n)`              | Caps AST nodes evaluated per Run (deterministic CPU bound) |
+
+`WithFunctions` entries are validated at Compile time: a nil entry, a
+non-function value, or an unsupported signature fails Compile with
+`ErrCompile`. Constants go in the env, not the function map.
 
 Builtins are opt-in: if you don't pass `WithBuiltins`, the only callable
 names are the higher-order forms (always registered) and anything you
@@ -100,13 +107,24 @@ registered yourself. This keeps the sandbox surface as narrow as you want.
 | `int(v)`          | `(any) -> int64`               | Truncates floats; strict base-10 parse for strings        |
 | `float(v)`        | `(any) -> float64`             | `strconv.ParseFloat` 64-bit for strings                   |
 | `bool(v)`         | `(any) -> bool`                | Same rules as truthiness                                  |
-| `if(c, t, f)`     | `(any, any, any) -> any`       | Eager ternary; `t` and `f` both evaluate before the call  |
 | `contains(h, n)`  | `(any, any) -> bool`           | Substring, element, or map-key presence                   |
 | `has(m, k)`       | `(any, string) -> bool`        | Key presence on a map (nil → false)                       |
 | `keys(m)`         | `(any) -> []any`               | Sorted string keys                                         |
 | `upper(s)`        | `(string) -> string`           | `strings.ToUpper`                                          |
 | `lower(s)`        | `(string) -> string`           | `strings.ToLower`                                          |
 | `sprintf(f, ...)` | `(string, ...any) -> string`   | `fmt.Sprintf`                                              |
+
+Opt-in helper groups (register with `WithFunctions`, kept out of
+`WithBuiltins` so minimal sandboxes stay minimal):
+
+- `expr.MathFuncs()` — `min`, `max` (variadic; int64 when all args
+  integral, else float64), `abs`, `floor`, `ceil`, `round` (integers
+  pass through unchanged)
+- `expr.StringFuncs()` — `trim(s)`, `split(s, sep)`, `join(xs, sep)`,
+  `replace(s, old, new)`, `startsWith(s, p)`, `endsWith(s, p)`
+- `expr.CollectionFuncs()` — `first(xs)`, `last(xs)` (nil for empty),
+  `sum(xs)` (int64 unless a float appears), `slice(xs, i, j)`
+  (half-open, negative indices from end, clamps; lists and strings)
 
 ## Higher-order forms (always registered)
 
@@ -125,6 +143,7 @@ you need to).
 | `find(list, pred)`    | element or `nil` | First match or nil                                    |
 | `count(list, pred)`   | `int64`          | Number of matches                                     |
 | `try(value, default)` | value or default | `value` if it evaluates cleanly, else `default`       |
+| `if(cond, then, else)`| branch value     | Lazy ternary: only the selected branch evaluates      |
 
 When a predicate inside an iterating form errors, the form wraps
 the error with its name, the predicate's source text, and the failing
@@ -134,10 +153,12 @@ add their own layer. The wrapping preserves the underlying chain so
 `errors.Is(err, ErrEvaluate)` still matches; cancellation passes
 through unchanged.
 
-`try` is the odd one out: it does not iterate a list, binds no `it`
-or `index`, and traps anything wrapping `ErrEvaluate` (missing keys,
-nil selectors, out-of-range indices, `int`/`float` parse failures).
-The `default` expression is lazy: it runs only when the primary fails.
+`try` and `if` are the odd ones out: they do not iterate a list and
+bind no `it` or `index`. `try` traps anything wrapping `ErrEvaluate`
+(missing keys, nil selectors, out-of-range indices, `int`/`float`
+parse failures); its `default` runs only when the primary fails.
+`if(cond, then, else)` evaluates only the branch selected by `cond`'s
+truthiness, so `if(n != 0, total/n, 0)` cannot divide by zero.
 `try` does **not** trap raw `context.Canceled`,
 `context.DeadlineExceeded`, or anything wrapping `ErrCompile`.
 
@@ -309,9 +330,14 @@ are wrapped so `errors.Is` and `errors.As` still find the original cause.
 Unknown identifiers, fields, and keys get a Levenshtein-based
 "did you mean...?" hint drawn from what's actually in scope.
 Higher-order forms (`map`, `filter`, `any`, `all`, `find`, `count`,
-`try`) referenced as bare identifiers get a tailored hint showing
-their call signature, e.g. `"count" is a special form, did you
-mean to call count(xs, predicate)?`.
+`try`, `if`) referenced as bare identifiers get a tailored hint
+showing their call signature, e.g. `"count" is a special form, did
+you mean to call count(xs, predicate)?`.
+
+`Program.Identifiers()` returns the sorted set of env-resolved names
+the expression references (excluding literals, bound `it`/`index`,
+registered functions, and special forms) — useful for validating an
+expression against a known env shape at load time.
 
 ```go
 if errors.Is(err, expr.ErrCompile) { /* ... */ }

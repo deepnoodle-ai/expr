@@ -379,3 +379,49 @@ func TestDocsExample9_WebhookPredicate(t *testing.T) {
 	}
 	assertDeepEqual(t, got, want)
 }
+
+// Example 10: Guarded math and the opt-in helper groups.
+func TestDocsExample10_GuardedMathAndGroups(t *testing.T) {
+	src := `{
+        "avg_price":  if(len(prices) > 0, sum(prices) / len(prices), 0),
+        "spread":     if(len(prices) > 0, max(0, last(prices) - first(prices)), 0),
+        "top_three":  slice(prices, 0, 3),
+        "sku_list":   join(map(items, upper(it.sku)), ", "),
+    }`
+	opts := []Option{
+		WithBuiltins(),
+		WithFunctions(MathFuncs()),
+		WithFunctions(StringFuncs()),
+		WithFunctions(CollectionFuncs()),
+	}
+	env := map[string]any{
+		"prices": []any{int64(10), int64(20), int64(60)},
+		"items": []any{
+			map[string]any{"sku": "a-1"},
+			map[string]any{"sku": "b-2"},
+		},
+	}
+	got := runDocExample(t, src, env, opts...)
+	want := map[string]any{
+		"avg_price": int64(30),
+		"spread":    int64(50),
+		"top_three": []any{int64(10), int64(20), int64(60)},
+		"sku_list":  "A-1, B-2",
+	}
+	assertDeepEqual(t, got, want)
+
+	// The doc claims the empty-list case returns 0 instead of a
+	// division-by-zero error, because if() is lazy.
+	emptyEnv := map[string]any{
+		"prices": []any{},
+		"items":  []any{},
+	}
+	got = runDocExample(t, src, emptyEnv, opts...)
+	want = map[string]any{
+		"avg_price": int64(0),
+		"spread":    int64(0),
+		"top_three": []any{},
+		"sku_list":  "",
+	}
+	assertDeepEqual(t, got, want)
+}

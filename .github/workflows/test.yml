@@ -32,3 +32,14 @@ jobs:
 
       - name: Test
         run: go test -race -count=1 ./...
+
+      # Short fuzz runs catch pre-parse rewriter regressions that the
+      # seed corpora alone miss (e.g. `?` combined with literals).
+      - name: Fuzz smoke
+        run: |
+          go test -run='^$' -fuzz='^FuzzCompile$' -fuzztime=15s .
+          go test -run='^$' -fuzz='^FuzzEval$' -fuzztime=15s .
+          go test -run='^$' -fuzz='^FuzzTemplateParse$' -fuzztime=15s .
+          go test -run='^$' -fuzz='^FuzzTemplateEval$' -fuzztime=15s .
+          go test -run='^$' -fuzz='^FuzzRewrite$' -fuzztime=15s ./internal/jsonlit
+          go test -run='^$' -fuzz='^FuzzRewrite$' -fuzztime=15s ./internal/optaccess

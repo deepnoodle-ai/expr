@@ -70,9 +70,11 @@ type Option func(*compileConfig)
 // It is consumed during parsing to build the function dispatch tables
 // baked into the resulting Program.
 type compileConfig struct {
-	funcs     map[string]any
-	prepared  map[string]*preparedFunc
-	fieldTags *structTagConfig
+	funcs      map[string]any
+	prepared   map[string]*preparedFunc
+	fieldTags  *structTagConfig
+	evalBudget int
+	errs       []error
 }
 
 func newCompileConfig() *compileConfig {
@@ -98,20 +100,48 @@ func WithBuiltins() Option {
 // values to the declared parameter types at call time. Return signatures of
 // `T`, `(T, error)`, and `()` are supported. Variadic functions are also
 // supported.
+//
+// Invalid registrations — a nil entry, a value that is not a Go
+// function, or a function with an unsupported signature (more than two
+// return values, or a second return that is not error) — cause Compile
+// to fail with ErrCompile. Surfacing the mistake at load time is the
+// point of the Compile/Run split; before this check the error would
+// hide until the expression first called the bad entry.
 func WithFunctions(funcs map[string]any) Option {
 	return func(c *compileConfig) {
 		for name, fn := range funcs {
 			c.funcs[name] = fn
 			pf, err := prepareFunc(name, fn)
 			if err != nil {
-				// Defer error surfacing to call-time; store a
-				// nil-native preparedFunc entry so lookups still
-				// find the name (useful for better error hints).
+				c.errs = append(c.errs, err)
+				// Keep a name-only entry so later options can still
+				// override it and lookups find the name.
 				c.prepared[name] = &preparedFunc{name: name}
 				continue
 			}
 			c.prepared[name] = pf
 		}
+	}
+}
+
+// WithEvalBudget bounds the total work a single Run may perform. Each
+// AST node evaluated — including every per-element re-evaluation of a
+// higher-order form's predicate — consumes one unit; when the budget
+// is exhausted, Run fails with an ErrEvaluate-wrapped error.
+//
+// MaxSourceLength and MaxEvalDepth bound memory and stack, but not
+// CPU: nested higher-order forms multiply, so a ~60-byte expression
+// like map(xs, map(xs, map(xs, it))) over a 10k-element list is 10^12
+// predicate evaluations. Context deadlines cap wall-clock time but
+// still let one expression burn a core for the full timeout; a budget
+// makes hostile-input behavior deterministic and cheap to reject.
+//
+// n <= 0 means unlimited (the default). The budget counts evaluator
+// steps, not time spent inside registered functions — bound those
+// separately (see docs/guides/sandboxing.md).
+func WithEvalBudget(n int) Option {
+	return func(c *compileConfig) {
+		c.evalBudget = n
 	}
 }
 
@@ -152,6 +182,9 @@ func Compile(code string, opts ...Option) (*Program, error) {
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	if len(cfg.errs) > 0 {
+		return nil, fmt.Errorf("%w: %w", ErrCompile, errors.Join(cfg.errs...))
+	}
 	// Pipeline order: optaccess turns `?.`/`?[` into sentinel calls
 	// while the source still uses raw operator syntax; jsonlit then
 	// rewrites bare composite literals; preprocessSource handles the
@@ -167,11 +200,12 @@ func Compile(code string, opts ...Option) (*Program, error) {
 		return nil, err
 	}
 	p := &Program{
-		source:    code,
-		root:      node,
-		funcs:     cfg.funcs,
-		prepared:  cfg.prepared,
-		fieldTags: cfg.fieldTags,
+		source:     code,
+		root:       node,
+		funcs:      cfg.funcs,
+		prepared:   cfg.prepared,
+		fieldTags:  cfg.fieldTags,
+		evalBudget: cfg.evalBudget,
 	}
 	p.compile()
 	return p, nil
@@ -305,7 +339,7 @@ func matchRewrite(tok token.Token) (struct {
 		tok      token.Token
 		src      string
 		internal string
-}{}, false
+	}{}, false
 }
 
 // displayIdent converts an internal rewritten identifier back to the

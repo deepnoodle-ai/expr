@@ -34,6 +34,28 @@ expr.Compile(src,
 )
 ```
 
+## Opt-in helper sets
+
+Before writing your own string/math/list helpers, check the bundled
+groups. Each returns a fresh `map[string]any` ready for
+`WithFunctions`, and they stay out of `WithBuiltins()` so a minimal
+sandbox stays minimal:
+
+```go
+expr.Compile(src,
+    expr.WithBuiltins(),
+    expr.WithFunctions(expr.MathFuncs()),       // min, max, abs, floor, ceil, round
+    expr.WithFunctions(expr.StringFuncs()),     // trim, split, join, replace, startsWith, endsWith
+    expr.WithFunctions(expr.CollectionFuncs()), // first, last, sum, slice
+)
+```
+
+All entries are pure and deterministic; see the
+[spec](../reference/spec.md#optional-builtin-groups) for exact
+signatures and typing rules. Hosts used to re-implement these
+slightly differently from each other — prefer the shared versions
+unless your semantics genuinely differ.
+
 ## Supported return signatures
 
 Only three shapes are legal:
@@ -45,9 +67,13 @@ Only three shapes are legal:
 | `()`          | `func(event Event)` (returns `nil` to expr)    |
 
 Anything else — multiple non-error returns, a second return that
-isn't `error` — errors at call time, not compile time. expr can't tell
-what's in your map without actually looking at the function's reflect
-type at dispatch time.
+isn't `error` — fails `Compile` with `ErrCompile`. So does a nil
+entry or a value that isn't a Go function at all. The registration
+is validated when `Compile` applies its options, which is the point
+of the Compile/Run split: a bad entry surfaces when you load the
+expression, not on the first request that happens to call it. If you
+want to expose a constant, put it in the env instead of the function
+map.
 
 A function that returns `(T, error)` and returns a non-nil error
 propagates that error up through `Program.Run`. The error chain is
@@ -189,6 +215,11 @@ at the top level.
   `Compile` — expr doesn't expect that and may read from it again.
 - **`context.Context` detection is exact.** The parameter type must be
   literally `context.Context` (the interface), not a type alias.
-- **A registered function that panics panics the caller.** expr does
-  not `recover` around user code. If you want panic safety, wrap in the
-  function, not the expression.
+- **Runtime panics are contained; deliberate panics are not.** A
+  `runtime.Error` panic inside a registered function (nil deref,
+  index out of range) comes back from `Run` as an `ErrEvaluate`
+  instead of crashing the host. An explicit `panic("...")` with any
+  other value still propagates — that's a deliberate signal expr
+  won't swallow. Either way, a function that panics on input an
+  expression can supply is a bug; fix it rather than relying on the
+  recovery.

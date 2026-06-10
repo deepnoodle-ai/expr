@@ -437,21 +437,22 @@ func TestCall_UnknownFunction(t *testing.T) {
 	require.Contains(t, err.Error(), "unknown function")
 }
 
+// Registering a function with an unsupported signature fails at
+// Compile time — the registration could never be called successfully,
+// so surfacing it at load time beats hiding it until the first call.
 func TestCall_TooManyReturns(t *testing.T) {
-	opts := []Option{WithFunctions(map[string]any{
+	_, err := Compile("three()", WithFunctions(map[string]any{
 		"three": func() (int, int, int) { return 1, 2, 3 },
-	})}
-	_, err := evalExpr(t.Context(), "three()", nil, opts...)
-	require.ErrorIs(t, err, ErrEvaluate)
+	}))
+	require.ErrorIs(t, err, ErrCompile)
 	require.Contains(t, err.Error(), "returns")
 }
 
 func TestCall_SecondReturnNotError(t *testing.T) {
-	opts := []Option{WithFunctions(map[string]any{
+	_, err := Compile("bad()", WithFunctions(map[string]any{
 		"bad": func() (int, string) { return 1, "x" },
-	})}
-	_, err := evalExpr(t.Context(), "bad()", nil, opts...)
-	require.ErrorIs(t, err, ErrEvaluate)
+	}))
+	require.ErrorIs(t, err, ErrCompile)
 	require.Contains(t, err.Error(), "second return must be error")
 }
 
@@ -747,23 +748,33 @@ func TestBuiltin_If_Arity(t *testing.T) {
 	}
 }
 
-// Without WithBuiltins, `if(...)` must report a clean "unknown
-// function" error using the user-visible name, not the internal
-// rewrite sentinel.
+// `if` is a special form like map/filter/try: always available, no
+// WithBuiltins required.
 func TestBuiltin_If_NotRegistered(t *testing.T) {
-	_, err := evalExpr(t.Context(), `if(true, 1, 2)`, nil)
-	require.ErrorIs(t, err, ErrEvaluate)
-	require.Contains(t, err.Error(), `unknown function "if"`)
+	got, err := evalExpr(t.Context(), `if(true, 1, 2)`, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got)
 }
 
-// `if` is eager: the unselected branch still evaluates, so a
-// runtime error there propagates. Users who need laziness reach for
-// try, &&, or ||.
-func TestBuiltin_If_EagerEvaluation(t *testing.T) {
+// `if` is lazy: only the branch selected by the condition evaluates,
+// so the guard idiom protects against errors in the untaken branch.
+func TestBuiltin_If_LazyEvaluation(t *testing.T) {
 	opts := []Option{WithBuiltins()}
-	env := map[string]any{"xs": []any{1, 2, 3}}
-	_, err := evalExpr(t.Context(), `if(true, xs[0], xs[99])`, env, opts...)
-	require.Error(t, err)
+	env := map[string]any{"xs": []any{int64(1), int64(2), int64(3)}}
+
+	got, err := evalExpr(t.Context(), `if(true, xs[0], xs[99])`, env, opts...)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got)
+
+	// The canonical division guard.
+	got, err = evalExpr(t.Context(), `if(n != 0, 10/n, 0)`, map[string]any{"n": int64(0)}, opts...)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), got)
+
+	// An error in the *taken* branch still propagates.
+	_, err = evalExpr(t.Context(), `if(false, xs[0], xs[99])`, env, opts...)
+	require.ErrorIs(t, err, ErrEvaluate)
+	require.Contains(t, err.Error(), "out of range")
 }
 
 // A user-registered `if` must shadow the builtin, matching the

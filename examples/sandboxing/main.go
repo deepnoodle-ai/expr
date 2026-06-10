@@ -24,7 +24,10 @@ func main() {
 	}
 
 	// Compile once. Only builtins are registered — no I/O, no mutation.
-	p, err := expr.Compile(src, expr.WithBuiltins())
+	// The eval budget caps total work per Run, so hostile nesting like
+	// map(xs, map(xs, map(xs, it))) fails deterministically instead of
+	// burning a core until the deadline.
+	p, err := expr.Compile(src, expr.WithBuiltins(), expr.WithEvalBudget(100_000))
 	if err != nil {
 		panic(err)
 	}

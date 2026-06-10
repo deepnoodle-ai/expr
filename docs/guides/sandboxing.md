@@ -79,6 +79,41 @@ checking `ctx` cannot be interrupted — Go has no way to kill a
 goroutine. If you register I/O, take a `context.Context` as the first
 parameter (expr injects it automatically) and honor it.
 
+## Deterministic work bound: `WithEvalBudget`
+
+Source-length and depth limits bound memory and stack, and context
+deadlines bound wall-clock time — but none of them bound *work*.
+Higher-order forms multiply: each `map` layer re-evaluates its
+predicate per element, so
+
+```
+map(xs, map(xs, map(xs, it)))
+```
+
+over a 10k-element env list is 10¹² predicate evaluations from a
+~30-byte expression. With only a deadline, that expression burns a
+core for the full timeout, every time it is evaluated.
+
+`WithEvalBudget(n)` makes the bound deterministic: every AST node
+evaluated — including each per-element predicate re-evaluation —
+consumes one unit, and exhausting the budget fails the `Run` with an
+`ErrEvaluate` immediately, not at the deadline:
+
+```go
+p, err := expr.Compile(src, expr.WithBuiltins(), expr.WithEvalBudget(100_000))
+...
+_, err = p.Run(ctx, env) // "evaluation budget exceeded (limit 100000)"
+```
+
+Each `Run` gets the full budget (concurrent Runs do not share a
+counter), and `try(...)` cannot catch its way past exhaustion. Size
+the budget generously — honest policy expressions rarely evaluate
+more than a few thousand nodes, so 10⁵–10⁶ leaves orders of magnitude
+of headroom while still rejecting the hostile cases in microseconds.
+The budget counts evaluator steps only; time spent *inside* a
+registered function is invisible to it, so the context deadline
+remains the backstop for slow callees.
+
 ## What to register, and what not to
 
 Every function you register is a capability the expression can
@@ -103,13 +138,22 @@ Do not register:
   proxy for SSRF).
 - Functions that execute code or shell commands
   (`exec.Command`, `template.Execute`, `reflect.Call`).
-- Functions that panic on bad input.
+- Functions that panic on bad input. (As defense in depth, expr
+  converts `runtime.Error` panics — nil derefs, out-of-range indexing
+  — in any registered function, env callable, or bound method into an
+  `ErrEvaluate` instead of crashing the host. Deliberate `panic(...)`
+  calls with other values still propagate. Don't lean on this: a
+  function that panics on attacker-supplied input is still a bug.)
 
 The default set from `WithBuiltins()` is deliberately small and all
 deterministic / side-effect free: `len`, `string`, `int`, `float`,
 `bool`, `contains`, `has`, `keys`, `upper`, `lower`, `sprintf`.
 Nothing there can reach outside the process. If you want a minimal
-sandbox, start there.
+sandbox, start there. The opt-in groups `expr.MathFuncs()`,
+`expr.StringFuncs()`, and `expr.CollectionFuncs()` keep the same
+properties (pure, deterministic, allocation bounded by input size) —
+register the ones your expressions need via `WithFunctions` without
+widening the default surface.
 
 ## Auditing a function surface
 
@@ -170,6 +214,9 @@ authors but can reveal the shape of the env to attackers.
 
 - [ ] `MaxSourceLength` tuned to your inputs (default 64 KiB).
 - [ ] `MaxEvalDepth` left at 256 unless you have a reason to raise it.
+- [ ] `WithEvalBudget` set if expression authors are untrusted, so
+      hostile nesting fails deterministically instead of spinning
+      until the deadline.
 - [ ] Every `Run` call uses a context with a deadline.
 - [ ] No registered function does I/O without honoring context.
 - [ ] No registered function mutates shared state.

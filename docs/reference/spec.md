@@ -329,7 +329,6 @@ The standard set is:
 | `int(v)`        | `(any) -> int64, error`         | Numeric values convert (float truncates toward zero). Strings are parsed strictly with `strconv.ParseInt` base-10 (trimmed whitespace, no `0x`, no trailing garbage). |
 | `float(v)`      | `(any) -> float64, error`       | Like `int`, but `strconv.ParseFloat` 64-bit. |
 | `bool(v)`       | `(any) -> bool`                 | Same semantics as [truthiness](#truthiness). |
-| `if(c,t,f)`     | `(any, any, any) -> any`        | Eager three-argument selector: returns `t` when `c` is truthy, else `f`. Both branches always evaluate; reach for `try`, `&&`, or `\|\|` when one branch must be skipped. |
 | `contains(h,n)` | `(any, any) -> bool, error`     | Substring for string haystacks, element membership for slices/arrays (using [loose equality](#equality)), key presence for string-keyed maps. |
 | `has(m,k)`      | `(any, string) -> bool, error`  | True if map `m` has key `k`. Maps only. Nil → `false`. |
 | `keys(m)`       | `(any) -> []any, error`         | Sorted string keys. Other key types → error. |
@@ -337,14 +336,76 @@ The standard set is:
 | `upper(s)`      | `(string) -> string`            | `strings.ToUpper`. |
 | `sprintf(f,...)`| `(string, ...any) -> string`    | `fmt.Sprintf`. |
 
+`if(cond, then, else)` is not a builtin: it is a lazily evaluated
+[special form](#higher-order-special-forms), always available without
+`WithBuiltins`.
+
+### Registration validation
+
+`WithFunctions` entries are validated when `Compile` applies its
+options. A nil entry, a value that is not a Go function, or a function
+with an unsupported signature (more than two return values, or a
+second return that is not `error`) fails `Compile` with `ErrCompile` —
+the mistake surfaces at load time rather than on the expression's
+first call. Constants belong in the env, not in `WithFunctions`.
+
+### Optional builtin groups
+
+Three opt-in helper sets extend the default builtins without widening
+a minimal sandbox. Each returns a fresh `map[string]any` for
+`WithFunctions`; all entries are deterministic and side-effect free:
+
+```go
+p, err := expr.Compile(src,
+    expr.WithBuiltins(),
+    expr.WithFunctions(expr.MathFuncs()),
+    expr.WithFunctions(expr.StringFuncs()),
+    expr.WithFunctions(expr.CollectionFuncs()),
+)
+```
+
+`expr.MathFuncs()`:
+
+| Name              | Signature                       | Notes |
+| ----------------- | ------------------------------- | ----- |
+| `min(a, ...)`     | `(num, ...num) -> num, error`   | Smallest argument. `int64` when every argument is integral, `float64` otherwise. At least one argument. |
+| `max(a, ...)`     | `(num, ...num) -> num, error`   | Largest argument; same typing rule as `min`. |
+| `abs(n)`          | `(num) -> num, error`           | Absolute value. `int64` in → `int64` out; `abs(MinInt64)` errors like unary minus. |
+| `floor(v)`        | `(num) -> num, error`           | `math.Floor` for floats; integers pass through unchanged. |
+| `ceil(v)`         | `(num) -> num, error`           | `math.Ceil`; integers pass through. |
+| `round(v)`        | `(num) -> num, error`           | `math.Round` (half away from zero); integers pass through. |
+
+`expr.StringFuncs()`:
+
+| Name                    | Signature                            | Notes |
+| ----------------------- | ------------------------------------ | ----- |
+| `trim(s)`               | `(string) -> string, error`          | `strings.TrimSpace`. |
+| `split(s, sep)`         | `(string, string) -> []any, error`   | `strings.Split`; elements are strings. |
+| `join(xs, sep)`         | `(list, string) -> string, error`    | Elements must be strings. Nil list → `""`. |
+| `replace(s, old, new)`  | `(string, string, string) -> string, error` | `strings.ReplaceAll`. |
+| `startsWith(s, prefix)` | `(string, string) -> bool, error`    | `strings.HasPrefix`. |
+| `endsWith(s, suffix)`   | `(string, string) -> bool, error`    | `strings.HasSuffix`. |
+
+`expr.CollectionFuncs()`:
+
+| Name              | Signature                       | Notes |
+| ----------------- | ------------------------------- | ----- |
+| `first(xs)`       | `(list) -> any, error`          | First element; `nil` for nil or empty lists. |
+| `last(xs)`        | `(list) -> any, error`          | Last element; `nil` for nil or empty lists. |
+| `sum(xs)`         | `(list) -> num, error`          | Numeric sum. `int64` (overflow-checked) when every element is integral, `float64` otherwise. Nil/empty → `0`. |
+| `slice(xs, i, j)` | `(list\|string, int, int) -> list\|string, error` | Half-open range `[i, j)`. Lists yield `[]any`; strings slice by rune. Negative indices count from the end; out-of-range bounds clamp; `i > j` → empty. Covers the rejected `xs[i:j]` syntax. |
+
 ## Higher-order special forms
 
-expr also provides a fixed set of **special forms** for iterating
-lists. Unlike the standard builtins, the higher-order forms are always
-registered and do not require `WithBuiltins`. They look like ordinary
-function calls in source, but the second argument (the predicate) is
-not evaluated eagerly. Instead, the form re-evaluates the predicate
-AST once per element with two extra identifiers in scope:
+expr also provides a fixed set of **special forms**. Unlike the
+standard builtins, special forms are always registered and do not
+require `WithBuiltins`. They look like ordinary function calls in
+source, but their arguments are not all evaluated eagerly. Six of
+them iterate lists (`map`, `filter`, `any`, `all`, `find`, `count`);
+`try` and `if` instead use laziness for error recovery and
+branching. For the iterating forms, the second argument (the
+predicate) is re-evaluated once per element with two extra
+identifiers in scope:
 
 - `it` — the current element
 - `index` — the 0-based position as an `int64`
@@ -364,6 +425,7 @@ element and the outer `it` is no longer reachable until the inner
 | `find(list, pred)`   | element or `nil`           | First element for which `pred` is truthy, or `nil`. |
 | `count(list, pred)`  | `int64`                    | Number of elements for which `pred` is truthy. |
 | `try(value, default)`| value or `default`         | Evaluates `value`; returns `default` if `value` raised an `ErrEvaluate` (missing key, type error, out-of-range index, etc.). The `default` expression is only evaluated when the primary fails. |
+| `if(cond, then, else)`| `then` or `else` value    | Lazy three-argument selector: evaluates `cond`, then **only** the branch selected by `cond`'s [truthiness](#truthiness). Binds no `it`/`index`. |
 
 The `list` argument must be a slice or array (or `nil`, which is
 treated as empty). Maps are not iterated by these forms; use
@@ -404,14 +466,30 @@ try(int(input), 0) > 0
 try(user.nickname, nil) || "(none)"
 ```
 
+`if(cond, then, else)` is the other non-iterating form. It is the
+language's ternary: the condition decides via truthiness, and only
+the selected branch evaluates, so an error in the untaken branch is
+never raised. That makes the guard idiom safe:
+
+```
+if(n != 0, total / n, 0)        // no division-by-zero from the guard
+if(user != nil, user.name, "?") // no nil-selector error
+```
+
+All three arguments see the enclosing scope; `if` binds no implicit
+`it`/`index`. (`if` is a Go statement keyword, so like `map` it is
+rewritten to an internal token before parsing — invisible except that
+it is why `if` can be called at all.)
+
 Special-form names can be shadowed: if `WithFunctions` registers a
 function with the same name, or the caller's env contains an entry
 with that name, the user binding wins. This lets consumers replace
-the built-in behavior when they need to. The `map` keyword is
-special because Go's parser reserves it: expr rewrites `map` to an
-internal token before parsing so the form can still be called as
-`map(xs, it * 2)`, and translates it back for error messages and
-method lookups.
+the built-in behavior when they need to — note that a shadowed `if`
+or `try` goes through the ordinary call path, where all arguments
+evaluate eagerly. The `map` keyword is special because Go's parser
+reserves it: expr rewrites `map` to an internal token before parsing
+so the form can still be called as `map(xs, it * 2)`, and translates
+it back for error messages and method lookups.
 
 ## Optional access (`?.` and `?[`)
 
@@ -496,6 +574,14 @@ The following are hard limits:
   trees deeper than this return `ErrEvaluate: expression nested too
   deeply`. This caps selector chains (`a.b.c...`), nested binary
   expressions, and nested calls.
+- **Evaluation budget** (opt-in): `WithEvalBudget(n)` bounds the total
+  number of AST nodes a single `Run` may evaluate, counting every
+  per-element re-evaluation of a higher-order predicate. Exhausting
+  the budget returns `ErrEvaluate: evaluation budget exceeded`. This
+  is the only deterministic CPU bound — source length and depth limits
+  do not stop nested higher-order forms from multiplying work
+  (`map(xs, map(xs, map(xs, it)))` is `len(xs)³` predicate
+  evaluations from a ~30-byte expression). The default is unlimited.
 
 Under adversarial input, expr must never:
 

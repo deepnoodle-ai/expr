@@ -24,8 +24,6 @@ import (
 //	                  as base-10 integers
 //	float(v)          numeric conversion to float64; strings parse strictly
 //	bool(v)           truthiness check (matches IsTruthy)
-//	if(cond, t, f)    pick t when cond is truthy, else f; both branches
-//	                  are evaluated eagerly
 //	contains(h, n)    substring for strings, element membership for
 //	                  slices/arrays (using loose numeric equality), or
 //	                  key presence for string-keyed maps
@@ -33,6 +31,11 @@ import (
 //	keys(m)           sorted string keys of a map
 //	lower(s), upper(s)  case conversion
 //	sprintf(fmt, ...) fmt.Sprintf-style formatting with cycle guards
+//
+// if(cond, then, else) is not in this map: it is a special form
+// (always available, lazily evaluated) — see higher_order.go. Opt-in
+// extension sets live in [MathFuncs], [StringFuncs], and
+// [CollectionFuncs].
 func Builtins() map[string]any {
 	return map[string]any{
 		"len":      Func(nativeLen),
@@ -40,7 +43,6 @@ func Builtins() map[string]any {
 		"int":      Func(nativeInt),
 		"float":    Func(nativeFloat),
 		"bool":     Func(nativeBool),
-		"if":       Func(nativeIf),
 		"contains": Func(nativeContains),
 		"has":      Func(nativeHas),
 		"keys":     Func(nativeKeys),
@@ -91,20 +93,6 @@ func nativeBool(_ context.Context, args []any) (any, error) {
 		return nil, err
 	}
 	return IsTruthy(args[0]), nil
-}
-
-// nativeIf is the eager three-argument selector. Both branches are
-// evaluated before the call, so use try / && / || when laziness
-// matters. The condition is interpreted via IsTruthy, so any value
-// (number, string, slice, ...) can drive the choice.
-func nativeIf(_ context.Context, args []any) (any, error) {
-	if err := checkArity("if", 3, len(args)); err != nil {
-		return nil, err
-	}
-	if IsTruthy(args[0]) {
-		return args[1], nil
-	}
-	return args[2], nil
 }
 
 func nativeContains(_ context.Context, args []any) (any, error) {
