@@ -214,6 +214,38 @@ func TestHigherOrder_PredicateErrorNestedForms(t *testing.T) {
 		"map sentinel leaked into error: %s", err.Error())
 }
 
+// Predicate source in error messages reads the way the user typed
+// it: keyword sentinels print as `if`, optional-access sentinels
+// print as `?.` / `?[`, JSON-style literals keep their bare form,
+// and string literals are never rewritten — even when their content
+// happens to spell an internal sentinel name.
+func TestHigherOrder_PredicateErrorDisplaySyntax(t *testing.T) {
+	cases := []struct {
+		expr string
+		want string
+	}{
+		{`filter(items, if(it, 1, 2) > "x")`, "filter predicate `if(it, 1, 2) > \"x\"` failed"},
+		{`filter(items, it?.name + 1)`, "filter predicate `it?.name + 1` failed"},
+		{`filter(items, it?[0] + "x")`, "filter predicate `it?[0] + \"x\"` failed"},
+		{`map(items, [it, 2] == "x")`, "map predicate `[it, 2] == \"x\"` failed"},
+		{`map(items, {"k": it} + 1)`, "map predicate `{\"k\": it} + 1` failed"},
+		{`map(items, "__expr_map__" + nil)`, "map predicate `\"__expr_map__\" + nil` failed"},
+	}
+	env := map[string]any{"items": []any{int64(1)}}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			_, err := evalExpr(t.Context(), tc.expr, env, WithBuiltins())
+			require.ErrorIs(t, err, ErrEvaluate)
+			require.Contains(t, err.Error(), tc.want)
+			for _, sentinel := range []string{ifFuncName, trySelectFormName, tryIndexFormName, "map[string]any"} {
+				if strings.Contains(err.Error(), sentinel) {
+					t.Fatalf("internal form %q leaked into error: %s", sentinel, err.Error())
+				}
+			}
+		})
+	}
+}
+
 // Each form name appears in its own wrapping. Spot-check the names
 // rather than enumerating: filter, find, count, any, all all flow
 // through the same forEach so a single fixture per name suffices.

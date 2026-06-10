@@ -9,6 +9,7 @@ import (
 	"go/printer"
 	"go/token"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -185,21 +186,159 @@ func wrapPredicateErr(name string, predicate ast.Expr, index int, err error) err
 }
 
 // formatPredicate prints a predicate AST back to source text for
-// inclusion in error messages. The internal map sentinel is
-// translated back to `map` so nested forms read the way users wrote
-// them. Returns "" if printing fails or if the result contains a
-// backtick (which would clash with the surrounding error format),
+// inclusion in error messages. Internal sentinels are translated
+// back to the syntax the user wrote: keyword idents (`map`, `if`)
+// recover their names, optional-access sentinel calls print as
+// `recv?.field` / `recv?[idx]`, and `[]any{...}` /
+// `map[string]any{...}` composite literals print in the JSON style
+// users type. Returns "" if printing fails or if the result contains
+// a backtick (which would clash with the surrounding error format),
 // letting wrapPredicateErr fall back to a position-only message.
 func formatPredicate(node ast.Expr) string {
-	var buf bytes.Buffer
-	if err := printer.Fprint(&buf, token.NewFileSet(), node); err != nil {
-		return ""
-	}
-	out := strings.ReplaceAll(buf.String(), mapFormName, "map")
-	if strings.ContainsRune(out, '`') {
+	out := exprDisplayString(node)
+	if out == "" || strings.ContainsRune(out, '`') {
 		return ""
 	}
 	return out
+}
+
+// exprDisplayString prints node via go/printer after rewriting it
+// into user-facing display form. Returns "" when printing fails.
+func exprDisplayString(node ast.Expr) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, token.NewFileSet(), displayExpr(node)); err != nil {
+		return ""
+	}
+	return buf.String()
+}
+
+// displayExpr returns a copy of node with internal sentinel forms
+// translated back to user-visible syntax. The original tree is never
+// mutated — it is shared by concurrent Runs. Constructs the printer
+// cannot represent directly (`?.`, `?[`, JSON-style literals) are
+// smuggled through as synthetic Idents whose Name carries the exact
+// display text; go/printer emits Ident names verbatim, and every
+// receiver position they can occupy is a primary expression, so no
+// precedence parentheses are lost.
+func displayExpr(node ast.Expr) ast.Expr {
+	switch n := node.(type) {
+	case *ast.Ident:
+		if d := displayIdent(n.Name); d != n.Name {
+			return &ast.Ident{Name: d}
+		}
+		return &ast.Ident{Name: n.Name}
+	case *ast.BasicLit:
+		return &ast.BasicLit{Kind: n.Kind, Value: n.Value}
+	case *ast.ParenExpr:
+		return &ast.ParenExpr{X: displayExpr(n.X)}
+	case *ast.UnaryExpr:
+		return &ast.UnaryExpr{Op: n.Op, X: displayExpr(n.X)}
+	case *ast.BinaryExpr:
+		return &ast.BinaryExpr{X: displayExpr(n.X), Op: n.Op, Y: displayExpr(n.Y)}
+	case *ast.SelectorExpr:
+		sel, _ := displayExpr(n.Sel).(*ast.Ident)
+		if sel == nil {
+			sel = n.Sel
+		}
+		return &ast.SelectorExpr{X: displayExpr(n.X), Sel: sel}
+	case *ast.IndexExpr:
+		return &ast.IndexExpr{X: displayExpr(n.X), Index: displayExpr(n.Index)}
+	case *ast.CallExpr:
+		if out, ok := displayOptAccess(n); ok {
+			return out
+		}
+		args := make([]ast.Expr, len(n.Args))
+		for i, a := range n.Args {
+			args[i] = displayExpr(a)
+		}
+		return &ast.CallExpr{Fun: displayExpr(n.Fun), Args: args}
+	case *ast.CompositeLit:
+		if out, ok := displayJSONLit(n); ok {
+			return out
+		}
+	}
+	return node
+}
+
+// displayOptAccess turns the optaccess sentinel calls back into the
+// `recv?.field` / `recv?[idx]` source forms, carried as a synthetic
+// Ident (see displayExpr). ok is false when the call does not match
+// the exact shape the rewrite emits.
+func displayOptAccess(n *ast.CallExpr) (ast.Expr, bool) {
+	ident, ok := n.Fun.(*ast.Ident)
+	if !ok || len(n.Args) != 2 {
+		return nil, false
+	}
+	switch ident.Name {
+	case trySelectFormName:
+		lit, ok := n.Args[1].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return nil, false
+		}
+		field, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return nil, false
+		}
+		recv := exprDisplayString(n.Args[0])
+		if recv == "" {
+			return nil, false
+		}
+		return &ast.Ident{Name: recv + "?." + field}, true
+	case tryIndexFormName:
+		recv := exprDisplayString(n.Args[0])
+		idx := exprDisplayString(n.Args[1])
+		if recv == "" || idx == "" {
+			return nil, false
+		}
+		return &ast.Ident{Name: recv + "?[" + idx + "]"}, true
+	}
+	return nil, false
+}
+
+// displayJSONLit prints []any{...} / map[string]any{...} composite
+// literals in the bare JSON style expr accepts in source, carried as
+// a synthetic Ident (see displayExpr). ok is false for any other
+// composite shape.
+func displayJSONLit(n *ast.CompositeLit) (ast.Expr, bool) {
+	switch typ := n.Type.(type) {
+	case *ast.ArrayType:
+		if typ.Len != nil {
+			return nil, false
+		}
+		if ident, ok := typ.Elt.(*ast.Ident); !ok || ident.Name != "any" {
+			return nil, false
+		}
+		parts := make([]string, len(n.Elts))
+		for i, e := range n.Elts {
+			s := exprDisplayString(e)
+			if s == "" {
+				return nil, false
+			}
+			parts[i] = s
+		}
+		return &ast.Ident{Name: "[" + strings.Join(parts, ", ") + "]"}, true
+	case *ast.MapType:
+		kIdent, kOk := typ.Key.(*ast.Ident)
+		vIdent, vOk := typ.Value.(*ast.Ident)
+		if !kOk || !vOk || kIdent.Name != "string" || vIdent.Name != "any" {
+			return nil, false
+		}
+		parts := make([]string, len(n.Elts))
+		for i, e := range n.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok {
+				return nil, false
+			}
+			k := exprDisplayString(kv.Key)
+			v := exprDisplayString(kv.Value)
+			if k == "" || v == "" {
+				return nil, false
+			}
+			parts[i] = k + ": " + v
+		}
+		return &ast.Ident{Name: "{" + strings.Join(parts, ", ") + "}"}, true
+	}
+	return nil, false
 }
 
 func formMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
