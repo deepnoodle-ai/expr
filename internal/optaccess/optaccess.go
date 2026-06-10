@@ -12,9 +12,11 @@
 // skipped entirely.
 //
 // The LHS of `?.` / `?[` is the primary expression that ends just
-// before the `?`. The walker matches balanced parens and brackets so
-// `f(a)?.b`, `a[0]?.b`, and `(a + b)?.c` all rewrite with the
-// expected LHS. Chained optional access (`a?.b?.c`) is processed by
+// before the `?`. The walker matches balanced parens, brackets, and
+// braces so `f(a)?.b`, `a[0]?.b`, `(a + b)?.c`, `[1, 2]?[0]`, and
+// `{"k": 1}?.k` all rewrite with the expected LHS, as do calls on
+// the `map` and `if` keywords that expr accepts as call targets.
+// Chained optional access (`a?.b?.c`) is processed by
 // repeated single-rewrite passes until the source no longer contains
 // `?.` / `?[`, producing nested calls like
 // `__try_select__(__try_select__(a, "b"), "c")`.
@@ -69,11 +71,11 @@ func rewriteOnce(src string) (string, bool) {
 		next := toks[i+1]
 		switch next.kind {
 		case token.PERIOD:
-			if i+2 >= len(toks) || toks[i+2].kind != token.IDENT {
+			if i+2 >= len(toks) || !isFieldToken(toks[i+2].kind) {
 				continue
 			}
 			lhsStart := lhsStartIdx(toks, src, i)
-			if lhsStart < 0 {
+			if lhsStart < 0 || lhsStart >= i {
 				continue
 			}
 			field := toks[i+2].lit
@@ -89,7 +91,7 @@ func rewriteOnce(src string) (string, bool) {
 				continue
 			}
 			lhsStart := lhsStartIdx(toks, src, i)
-			if lhsStart < 0 {
+			if lhsStart < 0 || lhsStart >= i {
 				continue
 			}
 			lhsBytes := src[toks[lhsStart].pos:toks[i].pos]
@@ -154,6 +156,20 @@ func isQuestion(src string, t tokenInfo) bool {
 	return t.kind == token.ILLEGAL && t.end-t.pos == 1 && src[t.pos] == '?'
 }
 
+// isFieldToken reports whether t can be the field name after `?.`.
+// Plain identifiers are the normal case; `map` and `if` are accepted
+// too because expr lets those keywords act as ordinary identifiers
+// (the engine rewrites `.map` / `.if` selectors on the non-optional
+// path), and the field name is spliced into a string literal here, so
+// no keyword rewrite is needed downstream.
+func isFieldToken(t token.Token) bool {
+	switch t {
+	case token.IDENT, token.MAP, token.IF:
+		return true
+	}
+	return false
+}
+
 // matchBracketForward finds the index of the `]` that closes the `[`
 // at lbrack. Returns -1 if no matching close exists.
 func matchBracketForward(toks []tokenInfo, lbrack int) int {
@@ -188,7 +204,10 @@ func lhsStartIdx(toks []tokenInfo, src string, qIdx int) int {
 	for i >= 0 {
 		t := toks[i]
 		switch t.kind {
-		case token.IDENT, token.INT, token.FLOAT, token.STRING, token.CHAR:
+		case token.IDENT, token.INT, token.FLOAT, token.STRING, token.CHAR,
+			token.MAP, token.IF:
+			// `map` and `if` walk like identifiers: expr accepts them
+			// as ordinary names in selector chains (`a.map?.x`).
 			if i-1 >= 0 && toks[i-1].kind == token.PERIOD {
 				i -= 2
 				continue
@@ -199,8 +218,29 @@ func lhsStartIdx(toks []tokenInfo, src string, qIdx int) int {
 			if j < 0 {
 				return -1
 			}
+			if j == 0 {
+				// The bracket pair opens the input, so it can only be
+				// an array literal: `[1, 2]?[0]`.
+				return 0
+			}
 			i = j - 1
 			continue
+		case token.RBRACE:
+			// Brace-closed primary: a bare object literal `{...}?.x`.
+			// Typed composite literals (`[]any{...}`, `T{...}`) would
+			// need a backwards type-expression walk; decline those and
+			// let the parser report the stray `?`.
+			j := matchBraceBack(toks, i)
+			if j < 0 {
+				return -1
+			}
+			if j == 0 {
+				return 0
+			}
+			if startsTypedComposite(toks[j-1].kind) {
+				return -1
+			}
+			return j
 		case token.RPAREN:
 			j := matchParenBack(toks, i)
 			if j < 0 {
@@ -265,12 +305,44 @@ func matchParenBack(toks []tokenInfo, rparen int) int {
 	return -1
 }
 
+// matchBraceBack returns the index of the `{` that opens the `}`
+// at rbrace. Negative on imbalance.
+func matchBraceBack(toks []tokenInfo, rbrace int) int {
+	depth := 1
+	for j := rbrace - 1; j >= 0; j-- {
+		switch toks[j].kind {
+		case token.RBRACE:
+			depth++
+		case token.LBRACE:
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// startsTypedComposite reports whether a `{` directly preceded by t
+// belongs to a typed composite literal (`[]any{...}`, `T{...}`,
+// `map[string]any{...}`) rather than a bare object literal.
+func startsTypedComposite(t token.Token) bool {
+	switch t {
+	case token.IDENT, token.RBRACK, token.RBRACE, token.RPAREN,
+		token.MAP, token.STRUCT, token.INTERFACE, token.CHAN, token.FUNC:
+		return true
+	}
+	return false
+}
+
 // extendsPrimary reports whether t can directly precede a `(` that
 // is part of a call expression. A `(` after one of these tokens is
-// always a call; after anything else it begins a paren group.
+// always a call; after anything else it begins a paren group. `map`
+// and `if` are included because expr accepts them as call targets
+// (`map(xs, it)?[0]`, `if(c, a, b)?.x`).
 func extendsPrimary(t token.Token) bool {
 	switch t {
-	case token.IDENT, token.RBRACK, token.RPAREN:
+	case token.IDENT, token.RBRACK, token.RPAREN, token.MAP, token.IF:
 		return true
 	}
 	return false

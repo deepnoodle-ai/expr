@@ -387,12 +387,10 @@ func TestCall_OnNilSelectorReceiver(t *testing.T) {
 
 func TestCall_UnsupportedCallTarget(t *testing.T) {
 	// Call target is an index expression, which expr does not support
-	// as a callable (only identifiers and selectors are).
-	env := map[string]any{
-		"fns": []any{func() int64 { return 1 }},
-	}
-	_, err := evalExpr(t.Context(), "fns[0]()", env)
-	require.ErrorIs(t, err, ErrEvaluate)
+	// as a callable (only identifiers and selectors are). Rejected at
+	// Compile time so the mistake surfaces before any Run.
+	_, err := Compile("fns[0]()")
+	require.ErrorIs(t, err, ErrCompile)
 	require.Contains(t, err.Error(), "call target")
 }
 

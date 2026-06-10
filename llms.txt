@@ -280,9 +280,9 @@ See `docs/guides/examples.md` for worked multi-line expressions.
 - **Equality (`==`, `!=`)** is loose: mixed int/float kinds compare as
   `float64`; typed nil values compare equal to literal `nil`; mismatched
   types are `false` without error; uncomparable types error.
-- **Arithmetic:** int+int → int64 (wraps on overflow); any float mix →
-  float64; `+` on strings is concatenation. Division/modulo by zero
-  errors, not panics.
+- **Arithmetic:** int+int → int64 (overflow-checked: out-of-range
+  results error rather than wrap); any float mix → float64; `+` on
+  strings is concatenation. Division/modulo by zero errors, not panics.
 - **Truthiness:** nil, false, zero numbers, empty string, empty
   slice/array/map, and typed-nil nilable kinds are falsey. Everything
   else is truthy. String content is not inspected: `bool("false")` is

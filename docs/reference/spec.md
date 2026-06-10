@@ -27,6 +27,9 @@ accepted is exactly the subset of `ast.Expr` listed in
 - All integer literals become `int64`. Values outside the `int64` range
   return an `ErrEvaluate` at Run time, not at Compile time — the parser
   accepts them, but evaluation fails.
+- A negated literal is read as a single signed value, so
+  `-9223372036854775808` (`MinInt64`) evaluates fine even though the
+  bare digits overflow on their own.
 
 ### Floating-point literals
 
@@ -76,8 +79,9 @@ group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
   concatenation. Integer `/` and `%` by zero return `ErrEvaluate`.
 - Any mix of int and float promotes both to `float64`. `%` on floats
   uses `math.Mod`. Float `/` and `%` by zero return `ErrEvaluate`.
-- Integer overflow wraps (matching Go). `-MinInt64` and `MinInt64 / -1`
-  wrap silently to `MinInt64`; they do not panic.
+- Integer arithmetic is overflow-checked: `+`, `-`, and `*` whose exact
+  result does not fit in `int64` return `ErrEvaluate`, as do `-MinInt64`
+  and `MinInt64 / -1`. Nothing wraps silently and nothing panics.
 - `+` on any other type combination is an error.
 
 ### Comparison (`== != < <= >= >`)
@@ -242,7 +246,8 @@ The callable is resolved in order:
 2. If the target is a selector `x.f`, expr evaluates `x` and then
    looks for a method, struct field, or map entry named `f` on it.
 3. Any other call target (index expression, call expression, paren
-   expression) returns `ErrEvaluate: unsupported call target`.
+   expression, optional access) is rejected at Compile time with
+   `ErrCompile: call target must be a function name or selector`.
 
 ### Method resolution order (for selector calls)
 
@@ -434,6 +439,13 @@ The semantics:
   map, indexing a slice with a non-integer, indexing into a map with
   the wrong key type) still surfaces as `ErrEvaluate`. `?.` and `?[`
   swallow "not there" errors, not "real bugs."
+
+The receiver can be any primary expression: an identifier, a selector
+or index chain, a call (including `map(...)` and `if(...)`), a
+parenthesized group, or an array/object literal (`[1, 2]?[0]`,
+`{"a": 1}?.a`). `?.map` and `?.if` work the same way `.map` and
+`.if` do. Calling the result of an optional access (`a?.b()`) is not
+supported and is rejected at Compile time.
 
 `?.` and `?[` are pure source-level sugar. The rewrite happens
 before the parser sees the source, so they behave like calls on

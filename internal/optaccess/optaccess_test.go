@@ -46,10 +46,36 @@ func TestRewrite(t *testing.T) {
 		// inside higher-order predicate
 		{`map(users, it?.name)`, `map(users, __try_select__(it, "name"))`},
 
+		// LHS is an array literal, including one that opens the input
+		{`[1, 2]?[0]`, `__try_index__([1, 2], 0)`},
+		{`[1, 2]?.x`, `__try_select__([1, 2], "x")`},
+		{`x + [1, 2]?[0]`, `x + __try_index__([1, 2], 0)`},
+		// LHS is a bare object literal, including nested braces
+		{`{"a": 1}?.a`, `__try_select__({"a": 1}, "a")`},
+		{`{"a": {"b": 1}}?.a`, `__try_select__({"a": {"b": 1}}, "a")`},
+		{`f({"a": 1}?.a)`, `f(__try_select__({"a": 1}, "a"))`},
+
+		// `map` / `if` keyword call targets walk like identifiers
+		{`map(xs, it)?[0]`, `__try_index__(map(xs, it), 0)`},
+		{`if(c, a, b)?.x`, `__try_select__(if(c, a, b), "x")`},
+		// `map` / `if` as selector-chain links and as the field name
+		{`a.map?.x`, `__try_select__(a.map, "x")`},
+		{`a?.map`, `__try_select__(a, "map")`},
+		{`a?.if`, `__try_select__(a, "if")`},
+
+		// typed composite literals are declined (no backwards type
+		// walk); the parser reports the stray `?`
+		{`[]any{1}?.x`, `[]any{1}?.x`},
+		{`map[string]any{"a": 1}?.a`, `map[string]any{"a": 1}?.a`},
+
 		// `?` not followed by `.` or `[` is left alone
 		{`a ? b : c`, `a ? b : c`},
 		// `?` at start of source: nothing to rewrite
 		{`?.x`, `?.x`},
+		// `?` with no primary to its left: declined rather than
+		// splicing an empty LHS into the sentinel call
+		{`1 + ?.x`, `1 + ?.x`},
+		{`f(, ?[0])`, `f(, ?[0])`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

@@ -111,6 +111,22 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 		return n
 	case *ast.UnaryExpr:
 		n.X = p.prewalk(n.X)
+		// `-9223372036854775808` (MinInt64) is special: the bare
+		// literal overflows int64 on its own, so it never reaches
+		// litCache and the generic fold below can't see it. Parse the
+		// negation as a single signed literal instead, matching how
+		// users read it.
+		if n.Op == token.SUB {
+			if lit, ok := n.X.(*ast.BasicLit); ok && lit.Kind == token.INT {
+				if _, cached := p.litCache[lit]; !cached {
+					if i, err := strconv.ParseInt("-"+lit.Value, 0, 64); err == nil {
+						if wrapped, ok := p.wrapConst(i); ok {
+							return wrapped
+						}
+					}
+				}
+			}
+		}
 		if xv, ok := p.constValue(n.X); ok {
 			if v, err := applyUnary(n.Op, xv); err == nil {
 				if wrapped, ok := p.wrapConst(v); ok {
