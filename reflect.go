@@ -8,9 +8,13 @@ import (
 	"runtime"
 )
 
-// ctxType is the reflect.Type of context.Context; cached at package init so
-// buildCallArgs doesn't allocate a fresh one on every call.
-var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
+// ctxType and errValType are the reflect.Types of context.Context and
+// error; cached at package init so buildCallArgs and finishCall don't
+// construct fresh ones on every call.
+var (
+	ctxType    = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errValType = reflect.TypeOf((*error)(nil)).Elem()
+)
 
 // callFunction invokes fn with args using reflection. Argument values are
 // converted to the function's declared parameter types where possible.
@@ -91,8 +95,7 @@ func finishCall(name string, ft reflect.Type, out []reflect.Value) (any, error) 
 	case 1:
 		return out[0].Interface(), nil
 	case 2:
-		errType := reflect.TypeOf((*error)(nil)).Elem()
-		if !ft.Out(1).Implements(errType) {
+		if !ft.Out(1).Implements(errValType) {
 			return nil, fmt.Errorf("%w: %q: second return must be error, got %v", ErrEvaluate, name, ft.Out(1))
 		}
 		if !out[1].IsNil() {

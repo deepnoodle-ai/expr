@@ -47,10 +47,37 @@ func cleanFieldTags(names []string) []string {
 	return out
 }
 
+// goNamePlans caches Go-name field plans for untagged lookups, keyed by
+// struct type. reflect's FieldByName re-walks the field set (including
+// embedded promotion) on every call and dominates struct-env profiles;
+// resolving each name to an index path once per type and reusing it via
+// fieldByIndex makes repeated lookups O(depth). Types are finite per
+// process, so the cache is unbounded by design, mirroring the per-config
+// cache used for tagged lookups.
+var goNamePlans sync.Map // map[reflect.Type]*structFieldPlan
+
 func structFieldByName(rv reflect.Value, name string, fieldTags *structTagConfig) (reflect.Value, bool, error) {
 	if fieldTags == nil {
-		fv := rv.FieldByName(name)
-		return fv, fv.IsValid(), nil
+		t := rv.Type()
+		var plan *structFieldPlan
+		if p, ok := goNamePlans.Load(t); ok {
+			plan = p.(*structFieldPlan)
+		} else {
+			p, _ := goNamePlans.LoadOrStore(t, buildStructFieldPlan(t, nil))
+			plan = p.(*structFieldPlan)
+		}
+		entry, ok := plan.fields[name]
+		if !ok || entry.ambiguous {
+			// Ambiguous promoted names resolve to "not found", matching
+			// reflect.Value.FieldByName.
+			return reflect.Value{}, false, nil
+		}
+		fv, ok := fieldByIndex(rv, entry.index)
+		if !ok {
+			return reflect.Value{}, false, fmt.Errorf("%w: cannot access %q on nil pointer",
+				ErrEvaluate, name)
+		}
+		return fv, true, nil
 	}
 
 	plan := fieldTags.plan(rv.Type())

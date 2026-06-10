@@ -80,8 +80,7 @@ func prepareFunc(name string, fn any) (*preparedFunc, error) {
 		p.paramTypes[i] = ft.In(p.paramOff + i)
 	}
 	if p.numOut == 2 {
-		errType := reflect.TypeOf((*error)(nil)).Elem()
-		if !ft.Out(1).Implements(errType) {
+		if !ft.Out(1).Implements(errValType) {
 			return nil, fmt.Errorf("function %q: second return must be error, got %v", name, ft.Out(1))
 		}
 		p.hasErrRet = true
