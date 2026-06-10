@@ -165,3 +165,86 @@ func TestOptionalAccess_StringLiteralUntouched(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "obj?.field", got)
 }
+
+// Array and object literals are primaries, so `?.` / `?[` work on
+// them directly — including when the literal opens the expression.
+func TestOptionalAccess_LiteralReceivers(t *testing.T) {
+	cases := []struct {
+		expr string
+		want any
+	}{
+		{`[1, 2, 3]?[0]`, int64(1)},
+		{`[1, 2, 3]?[9]`, nil},
+		{`{"a": 1}?.a`, int64(1)},
+		{`{"a": 1}?.missing`, nil},
+		{`{"a": [1, 2]}?.a?[1]`, int64(2)},
+		{`1 + [10, 20]?[1]`, int64(21)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			got, err := evalExpr(t.Context(), tc.expr, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// The results of `map(...)` and `if(...)` calls accept optional
+// access just like ordinary function calls, even though Go reserves
+// those keywords.
+func TestOptionalAccess_SpecialFormReceivers(t *testing.T) {
+	env := map[string]any{"xs": []any{int64(1), int64(2)}}
+	cases := []struct {
+		expr string
+		want any
+	}{
+		{`map(xs, it * 2)?[0]`, int64(2)},
+		{`map(xs, it * 2)?[9]`, nil},
+		{`if(true, {"a": 1}, nil)?.a`, int64(1)},
+		{`filter(xs, it > 1)?[0]`, int64(2)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			got, err := evalExpr(t.Context(), tc.expr, env, WithBuiltins())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// `?.map` and `?.if` mirror the non-optional `.map` / `.if`
+// selectors, which expr accepts despite Go reserving the keywords.
+func TestOptionalSelect_KeywordField(t *testing.T) {
+	env := map[string]any{
+		"a": map[string]any{"map": int64(7), "if": int64(8)},
+		"b": map[string]any{},
+	}
+	cases := []struct {
+		expr string
+		want any
+	}{
+		{`a?.map`, int64(7)},
+		{`a?.if`, int64(8)},
+		{`b?.map`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			got, err := evalExpr(t.Context(), tc.expr, env)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// Calling the result of an optional access is not supported; the
+// mistake is reported at Compile time with a message that names the
+// operator rather than leaking the internal sentinel.
+func TestOptionalAccess_CallResultRejectedAtCompile(t *testing.T) {
+	for _, src := range []string{`a?.b()`, `a?[0]()`} {
+		t.Run(src, func(t *testing.T) {
+			_, err := Compile(src)
+			require.ErrorIs(t, err, ErrCompile)
+			require.Contains(t, err.Error(), "optional access")
+		})
+	}
+}
