@@ -71,7 +71,7 @@ Precedence and associativity come from `go/parser`. They match Go:
 
 Unary `!`, `-`, `+` bind tighter than any binary operator. Parentheses
 group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
-`>>`, `&^`) are parsed but not implemented — they return `ErrEvaluate`.
+`>>`, `&^`) parse but are rejected at Compile time with `ErrCompile`.
 
 ### Arithmetic (`+ - * / %`)
 
