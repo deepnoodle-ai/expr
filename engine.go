@@ -2,7 +2,8 @@
 // go/parser. It accepts the subset of Go expression syntax useful for
 // conditions, templates, and parameter interpolation: identifiers,
 // selectors, index expressions, arithmetic, comparisons, logical
-// operators, and calls to registered functions.
+// operators, calls to registered functions, and pipelines
+// (`a | f(x)` compiles as `f(a, x)`).
 //
 // expr is intentionally small and adds no external dependencies.
 //
@@ -215,6 +216,13 @@ func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
+	}
+	// Desugar pipe expressions (`a | f(x)` → `f(a, x)`) before
+	// validation so validate and the evaluator only ever see ordinary
+	// call nodes. See pipe.go.
+	node, err = desugarPipes(fset, node)
+	if err != nil {
+		return nil, err
 	}
 	if err := validate(fset, node); err != nil {
 		return nil, err

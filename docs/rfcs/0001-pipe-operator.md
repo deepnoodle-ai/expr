@@ -1,8 +1,15 @@
 # RFC 0001: Pipe Operator (`|`)
 
-**Status:** Draft  
+**Status:** Implemented (always on)  
 **Date:** 2026-06-12  
-**No implementation commitment has been made. This document exists to think the design through.**
+**Implementation notes:** The desugar, the non-call right-side errors,
+and the ambiguous-comparison diagnostic (§3.3) shipped as recommended.
+The opt-in recommendation (§7.3) was overridden: the default-on
+question (§9.2 step 5) was resolved in favor of enabling the pipe
+unconditionally, since `|` never compiled before and the token reuse
+therefore breaks no existing expression. Normative language
+documentation lives in [the spec](../reference/spec.md); this document
+records the design rationale.
 
 ---
 

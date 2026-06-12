@@ -554,3 +554,50 @@ sort(["banana", "apple"])  // → ["apple", "banana"]
 `sort` accepts all-numbers or all-strings; mixed types produce
 `ErrEvaluate`. It never mutates the input and returns a fresh `[]any`.
 `reverse` works on any list type and also returns a fresh copy.
+
+---
+
+## 13. Pipelines
+
+`a | f(x)` compiles as `f(a, x)`, so a transformation chain reads
+left to right instead of inside out. Rendering an error report:
+
+```go
+events |
+  filter(it.kind == "error") |
+  map(sprintf("[%s] %s", it.source, it.message)) |
+  join("\n")
+```
+
+(As with every operator, the `|` goes at the end of a continuation
+line, never at the start, because Go's semicolon insertion terminates
+a line that ends in an identifier or `)`.)
+
+Env (compile with `WithBuiltins` for `sprintf` and `StringFuncs` for
+`join`):
+
+```go
+map[string]any{
+    "events": []any{
+        map[string]any{"kind": "error", "source": "api", "message": "timeout"},
+        map[string]any{"kind": "info",  "source": "api", "message": "ok"},
+        map[string]any{"kind": "error", "source": "db",  "message": "deadlock"},
+    },
+}
+```
+
+Result:
+
+```
+[api] timeout
+[db] deadlock
+```
+
+The pipe is sugar only: the chain above is exactly
+`join(map(filter(events, ...), ...), "\n")` after compilation, and the
+named-binding forms compose the same way
+(`orders | filter(o, o.paid) | sortBy(o, o.total)`). The right side of
+each `|` must be written as a call (`xs | len()`, not `xs | len`). See
+the [spec](../reference/spec.md#pipeline-) for precedence rules. In
+short: pipe first, compare after (`xs | count(it.ok) == 2` works;
+`a == b | f()` is a compile error asking for parentheses).

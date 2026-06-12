@@ -64,14 +64,16 @@ Precedence and associativity come from `go/parser`. They match Go:
 | Precedence | Operators                      | Associativity |
 | ---------- | ------------------------------ | ------------- |
 | 5 (high)   | `*  /  %`                      | left          |
-| 4          | `+  -`                         | left          |
+| 4          | `+  -  \|`                     | left          |
 | 3          | `==  !=  <  <=  >  >=`         | left          |
 | 2          | `&&`                           | left          |
 | 1 (low)    | `\|\|`                         | left          |
 
 Unary `!`, `-`, `+` bind tighter than any binary operator. Parentheses
-group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
-`>>`, `&^`) parse but are rejected at Compile time with `ErrCompile`.
+group expressions as usual. The `|` token is the [pipeline
+operator](#pipeline-), not bitwise or. Go's remaining bitwise
+operators (`&`, `^`, `<<`, `>>`, `&^`) parse but are rejected at
+Compile time with `ErrCompile`.
 
 ### Arithmetic (`+ - * / %`)
 
@@ -109,6 +111,84 @@ group expressions as usual. Go's bitwise operators (`&`, `|`, `^`, `<<`,
   So `"ada" || "(none)"` is `"ada"`, `"" || "(none)"` is `"(none)"`,
   and `count || 0` falls back to `0` only when `count` is falsey.
   Where a strict bool is required, wrap with `bool(...)`.
+
+### Pipeline (`|`)
+
+`a | f(x, y)` evaluates exactly as `f(a, x, y)`: the left side becomes
+the first argument of the call on the right side. The rewrite happens once at Compile time,
+so the pipeline has no runtime semantics of its own: a piped call is
+the call, including for the higher-order special forms and their lazy
+evaluation rules. Pipes chain left to right:
+
+```
+checks | filter(!it.ok) | map(sprintf("- %s: %s", it.name, it.msg)) | join("\n")
+// identical to:
+join(map(filter(checks, !it.ok), sprintf("- %s: %s", it.name, it.msg)), "\n")
+```
+
+The pipe is a deliberate deviation from expr's strict-Go-subset
+identity: in Go this token means bitwise or. Before v1.2.0, expr
+rejected `|` at Compile time as an unsupported bitwise operator, so no
+previously-compilable expression changes meaning under the pipeline
+reading. The full design rationale lives in
+[RFC 0001](../rfcs/0001-pipe-operator.md).
+
+The right-hand side must be written as a call. Anything else (an
+identifier, a selector, an index, an optional access, a parenthesized
+expression, a literal) is rejected at Compile time with `ErrCompile`:
+
+```
+xs | len()        // ok: len(xs)
+xs | f            // ErrCompile: "f" is not a call (did you mean to write f(...)?)
+xs | filter       // ErrCompile: "filter" is a special form, did you mean
+                  //   to write filter(predicate)?
+xs | f()[0]       // ErrCompile: the right side parses as the index f()[0]
+(xs | f())[0]     // ok: index the piped result
+xs | a?.b         // ErrCompile: optional access is not a call
+```
+
+Because the rewrite is purely syntactic, it composes with every call
+shape: the iterating forms (`xs | filter(it > 0)` is
+`filter(xs, it > 0)`), the three-arg named-binding forms
+(`orders | filter(o, o.paid)`), the lazy forms (`v | try(fallback)` is
+`try(v, fallback)`, with `v` still evaluated under try's error
+handling), env-provided callables, and selector calls on env values.
+`map` and `if` work even though they are Go keywords; the keyword
+rewrite runs before parsing.
+
+Pipe targets follow the same resolution rules as any other call: an
+unregistered name compiles (the env may provide the callable at Run)
+and fails at evaluation with the usual unknown-function error.
+
+**Precedence.** `|` keeps Go's precedence: level 4, the same as `+`
+and `-`. That is tighter than comparisons, `&&`, and `||`, and looser
+than `*`, `/`, `%`, and unary operators. Postfix syntax (calls, `.field`,
+`[idx]`, `?.`, `?[`) binds tighter still. Consequences:
+
+```
+xs | count(it > 1) == 2      // (xs | count(it > 1)) == 2: pipe, then compare
+n + 1 | double()             // (n + 1) | double(): same level, left-assoc
+n | double() + 1             // (n | double()) + 1
+ok && xs | any(it > 0)       // ok && (xs | any(it > 0))
+x > 2 | if("big", "small")   // ErrCompile: ambiguous, see below
+(x > 2) | if("big", "small") // parenthesize to pipe a comparison
+```
+
+One shape is rejected outright rather than silently mis-grouping: a
+bare pipe as the **right** operand of a comparison. `a == b | f()`
+parses as `a == (b | f())`, with the pipe consuming the comparison's
+right operand, so expr fails compilation with an "ambiguous expression"
+error demanding parentheses; write `(a | f()) == b` or `a == (b | f())`
+to state which one you meant. A pipe on the *left* of a comparison
+(`xs | count(it > 1) == 2`) is the useful, unambiguous order and needs
+no parentheses.
+
+**Optional access.** An optional-access result pipes normally
+(`user?.name | upper()` is `upper(user?.name)`; a nil receiver pipes
+`nil` into the call, which the iterating forms treat as an empty
+list). The reverse needs parentheses: `?.` binds tighter than `|`, so
+accessing a field on a piped result is written
+`(xs | find(it.ok))?.name`.
 
 ### Unary
 
@@ -743,7 +823,8 @@ Only these `ast.Expr` node kinds are accepted; everything else returns
 - `*ast.Ident` — identifiers
 - `*ast.ParenExpr` — `( x )`
 - `*ast.UnaryExpr` — `!x`, `-x`, `+x`
-- `*ast.BinaryExpr` — arithmetic, comparison, logical
+- `*ast.BinaryExpr` — arithmetic, comparison, logical, pipeline
+  (`a | f(x)`, desugared to `f(a, x)` at Compile time)
 - `*ast.SelectorExpr` — `x.y`
 - `*ast.IndexExpr` — `x[i]`
 - `*ast.CallExpr` — `f(a, b, ...)`
@@ -760,7 +841,9 @@ with `ErrCompile`):
 - Function literals (`func() {}`)
 - Channel ops (`<-ch`, `ch <- v`)
 - Pointer/address ops (`*x`, `&x`)
-- Bitwise operators (`& | ^ << >> &^`)
+- Bitwise operators (`& ^ << >> &^`). The `|` token is the
+  [pipeline operator](#pipeline-); a `|` whose right side is not a
+  call is rejected at Compile time.
 - Imaginary number literals (`1i`)
 - Spread call arguments (`f(xs...)`)
 - Label and selector type names (`pkg.Type`)

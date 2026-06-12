@@ -32,6 +32,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  expr -i '{\"user\":{\"age\":36}}' 'user.age >= 18'\n")
 		fmt.Fprintf(os.Stderr, "  expr 'user.age >= 18' -i @user.json\n")
 		fmt.Fprintf(os.Stderr, "  echo '{\"x\":41}' | expr -i - 'x + 1'\n")
+		fmt.Fprintf(os.Stderr, "  expr -i '{\"xs\":[3,1,2]}' 'xs | filter(it > 1) | len()'\n")
 	}
 
 	// Reorder arguments so that flags may appear before or after the
