@@ -482,3 +482,222 @@ func TestGuide_HigherOrder_LazyIf(t *testing.T) {
 	got := runGuide(t, `if(len(xs) > 5, xs[5], "small")`, env)
 	assertDeepEqual(t, got, "small")
 }
+
+// --- higher-order-patterns.md: named bindings ---------------------------------
+
+func TestGuide_HigherOrder_NamedBinding_AllForms(t *testing.T) {
+	// higher-order-patterns.md: every iterating form accepts the three-arg shape.
+	orders := []any{
+		map[string]any{"status": "paid", "n": int64(2)},
+		map[string]any{"status": "open", "n": int64(1)},
+		map[string]any{"status": "paid", "n": int64(3)},
+	}
+	env := map[string]any{"orders": orders}
+
+	got := runGuide(t, `map(orders, o, o.n)`, env)
+	assertDeepEqual(t, got, []any{int64(2), int64(1), int64(3)})
+
+	got = runGuide(t, `filter(orders, o, o.status == "paid")`, env)
+	if len(got.([]any)) != 2 {
+		t.Fatalf("filter: expected 2, got %v", got)
+	}
+
+	got = runGuide(t, `any(orders, o, o.n > 2)`, env)
+	assertDeepEqual(t, got, true)
+
+	got = runGuide(t, `all(orders, o, o.n > 0)`, env)
+	assertDeepEqual(t, got, true)
+
+	got = runGuide(t, `count(orders, o, o.status == "paid")`, env)
+	assertDeepEqual(t, got, int64(2))
+}
+
+func TestGuide_HigherOrder_NamedBinding_NestedScoping(t *testing.T) {
+	// higher-order-patterns.md: outer named form + inner two-arg: `r` (review)
+	// stays visible inside the inner body because the inner named form doesn't
+	// bind `it`.
+	reviews := []any{
+		map[string]any{"author": "ann", "comments": []any{"a1", "a2"}},
+		map[string]any{"author": "bob", "comments": []any{"b1"}},
+	}
+	env := map[string]any{"reviews": reviews}
+
+	// Outer named (r), inner two-arg: `it` is the comment.
+	got := runGuide(t, `map(reviews, r, map(r.comments, r.author + "/" + it))`, env)
+	assertDeepEqual(t, got, []any{
+		[]any{"ann/a1", "ann/a2"},
+		[]any{"bob/b1"},
+	})
+}
+
+// --- higher-order-patterns.md: flatMap ----------------------------------------
+
+func TestGuide_HigherOrder_FlatMap(t *testing.T) {
+	// higher-order-patterns.md: flatMap(users, u, u.orders) flattens orders.
+	env := map[string]any{
+		"users": []any{
+			map[string]any{"orders": []any{int64(1), int64(2)}},
+			map[string]any{"orders": []any{int64(3)}},
+		},
+	}
+
+	got := runGuide(t, `flatMap(users, u, u.orders)`, env)
+	assertDeepEqual(t, got, []any{int64(1), int64(2), int64(3)})
+
+	// One-level-deep splice.
+	got = runGuide(t, `flatMap([1, [2, 3], 4], it)`, nil, WithBuiltins())
+	assertDeepEqual(t, got, []any{int64(1), int64(2), int64(3), int64(4)})
+
+	// nil splices as nothing.
+	got = runGuide(t, `flatMap([1, 2, 3], if(it > 1, [it, it], nil))`, nil, WithBuiltins())
+	assertDeepEqual(t, got, []any{int64(2), int64(2), int64(3), int64(3)})
+
+	// Strings are not split.
+	got = runGuide(t, `flatMap(["ab", "c"], it)`, nil, WithBuiltins())
+	assertDeepEqual(t, got, []any{"ab", "c"})
+}
+
+// --- higher-order-patterns.md: sortBy -----------------------------------------
+
+func TestGuide_HigherOrder_SortBy(t *testing.T) {
+	// higher-order-patterns.md: sortBy evaluates a key expr and returns a stable copy.
+	env := map[string]any{
+		"orders": []any{
+			map[string]any{"status": "paid", "n": int64(2)},
+			map[string]any{"status": "open", "n": int64(1)},
+			map[string]any{"status": "paid", "n": int64(3)},
+		},
+	}
+
+	got := runGuide(t, `map(sortBy(orders, o, o.n), o, o.n)`, env)
+	assertDeepEqual(t, got, []any{int64(1), int64(2), int64(3)})
+
+	// String keys sort lexicographically.
+	got = runGuide(t, `map(sortBy(orders, o, o.status), o, o.status)`, env)
+	assertDeepEqual(t, got, []any{"open", "paid", "paid"})
+
+	// Input list is not mutated.
+	first := env["orders"].([]any)[0].(map[string]any)
+	if first["n"] != int64(2) {
+		t.Fatalf("sortBy mutated input: first element changed to %v", first)
+	}
+}
+
+// --- higher-order-patterns.md: entries ----------------------------------------
+
+func TestGuide_HigherOrder_Entries(t *testing.T) {
+	// higher-order-patterns.md: entries makes maps iterable through the forms.
+	env := map[string]any{
+		"headers": map[string]any{
+			"content-type": "application/json",
+			"x-request-id": "abc123",
+		},
+	}
+
+	got := runGuide(t, `map(entries(headers), e, e.key + ": " + e.value)`, env)
+	assertDeepEqual(t, got, []any{"content-type: application/json", "x-request-id: abc123"})
+
+	// filter through entries.
+	scores := map[string]any{"alice": int64(90), "bob": int64(70), "carol": int64(85)}
+	got = runGuide(t, `map(filter(entries(scores), e, e.value > 80), e, e.key)`,
+		map[string]any{"scores": scores})
+	// keys are sorted by entries, so alice and carol qualify in sorted order.
+	assertDeepEqual(t, got, []any{"alice", "carol"})
+}
+
+// --- templates.md: JSON composite rendering -----------------------------------
+
+func TestGuide_Templates_JSONCompositeRendering(t *testing.T) {
+	// templates.md: maps, slices, arrays, and structs render as compact JSON.
+	env := map[string]any{
+		"config": map[string]any{"retries": int64(3)},
+		"files":  []any{"a.go", "b.go"},
+	}
+
+	tmpl, err := NewTemplate("${config} | ${files}", WithBuiltins())
+	if err != nil {
+		t.Fatalf("NewTemplate: %v", err)
+	}
+	out, err := tmpl.Render(t.Context(), env)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if out != `{"retries":3} | ["a.go","b.go"]` {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestGuide_Templates_CustomDelimiters(t *testing.T) {
+	// templates.md: WithTemplateDelimiters swaps the opener/closer.
+	env := map[string]any{"service": map[string]any{"name": "api"}}
+
+	tmpl, err := NewTemplate(
+		"Deploy ${{ service.name }} via: echo ${HOME}",
+		WithTemplateDelimiters("${{", "}}"),
+	)
+	if err != nil {
+		t.Fatalf("NewTemplate: %v", err)
+	}
+	out, err := tmpl.Render(t.Context(), env)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if out != "Deploy api via: echo ${HOME}" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestGuide_Templates_CustomFormatter(t *testing.T) {
+	// templates.md: WithTemplateFormatter runs first for every interpolated value.
+	env := map[string]any{"price": 12.5, "label": "total", "empty": nil}
+
+	tmpl, err := NewTemplate("${label}: ${price} (${empty})",
+		WithTemplateFormatter(func(v any) (string, bool) {
+			switch x := v.(type) {
+			case float64:
+				return fmt.Sprintf("%.2f", x), true
+			case nil:
+				return "N/A", true
+			}
+			return "", false
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewTemplate: %v", err)
+	}
+	out, err := tmpl.Render(t.Context(), env)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if out != "total: 12.50 (N/A)" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestGuide_Templates_CompileRejectsTemplateOnlyOptions(t *testing.T) {
+	// templates.md: template-only options passed to Compile fail at load time.
+	_, err := Compile("1+1", WithTemplateDelimiters("${{", "}}"))
+	if !errors.Is(err, ErrCompile) {
+		t.Fatalf("expected ErrCompile, got %v", err)
+	}
+	_, err = Compile("1+1", WithTemplateFormatter(func(any) (string, bool) { return "", false }))
+	if !errors.Is(err, ErrCompile) {
+		t.Fatalf("expected ErrCompile, got %v", err)
+	}
+}
+
+func TestGuide_Templates_ErrorsReportLineColumn(t *testing.T) {
+	// templates.md: runtime errors include line:column in the message.
+	src := "line one\nline two\n  ${boom} end"
+	tmpl, err := NewTemplate(src)
+	if err != nil {
+		t.Fatalf("NewTemplate: %v", err)
+	}
+	_, rerr := tmpl.Render(t.Context(), map[string]any{})
+	if rerr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(rerr.Error(), "at 3:3") {
+		t.Fatalf("expected line:col in error, got %v", rerr)
+	}
+}

@@ -1,6 +1,6 @@
 // Templates in anger: compile once, render many, with a registered
 // `join` helper so variable-length lists render as human-readable
-// text instead of Go slice syntax.
+// text instead of JSON, and a formatter that overrides nil rendering.
 package main
 
 import (
@@ -57,4 +57,36 @@ func main() {
 		panic(err)
 	}
 	fmt.Println(out)
+
+	// Composite values render as compact JSON by default.
+	configTmpl, err := expr.NewTemplate(`Config: ${config}`, expr.WithBuiltins())
+	if err != nil {
+		panic(err)
+	}
+	out, err = configTmpl.Render(ctx, map[string]any{
+		"config": map[string]any{"retries": int64(3), "timeout": "30s"},
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(out) // Config: {"retries":3,"timeout":"30s"}
+
+	// Custom formatter overrides rendering for specific types.
+	nilTmpl, err := expr.NewTemplate(
+		`Nickname: ${nickname}`,
+		expr.WithTemplateFormatter(func(v any) (string, bool) {
+			if v == nil {
+				return "(none)", true
+			}
+			return "", false
+		}),
+	)
+	if err != nil {
+		panic(err)
+	}
+	out, err = nilTmpl.Render(ctx, map[string]any{"nickname": nil})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(out) // Nickname: (none)
 }

@@ -453,15 +453,16 @@ func evalIdent(n *ast.Ident, env any, funcs map[string]any, fieldTags *structTag
 // struct, or an *itEnv wrapping one of the above. For structs, configured
 // field tags participate in field lookup, and fields are preferred over
 // methods when both match. Methods are returned as bound function values
-// so they can be invoked by a CallExpr node. An itEnv binds `it` and
-// `index` ahead of anything in its parent.
+// so they can be invoked by a CallExpr node. An itEnv binds its element
+// name (`it`, or the named binding of a three-arg form) and `index`
+// ahead of anything in its parent.
 func lookupEnv(env any, name string, fieldTags *structTagConfig) (any, bool, error) {
 	if env == nil {
 		return nil, false, nil
 	}
 	if it, ok := env.(*itEnv); ok {
 		switch name {
-		case "it":
+		case it.elementName():
 			return it.it, true, nil
 		case "index":
 			return it.index, true, nil
@@ -950,7 +951,7 @@ func lookupEnvRV(env any, name string, fieldTags *structTagConfig) (reflect.Valu
 	}
 	if it, ok := env.(*itEnv); ok {
 		switch name {
-		case "it":
+		case it.elementName():
 			return reflect.ValueOf(it.it), true, nil
 		case "index":
 			return reflect.ValueOf(it.index), true, nil
@@ -1285,7 +1286,7 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		return nil, false, nil
 	}
 	ident, ok := call.Fun.(*ast.Ident)
-	if !ok || ident.Name != "filter" || len(call.Args) != 2 {
+	if !ok || ident.Name != "filter" || len(call.Args) < 2 || len(call.Args) > 3 {
 		return nil, false, nil
 	}
 	// Respect identifier shadowing: a user-registered or env-bound
@@ -1307,11 +1308,19 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		return nil, false, nil
 	}
 
+	// Both the two-arg (`it`) and three-arg (named binding) forms are
+	// streamed; splitFormArgs validates the binding identifier with
+	// the same error the general form path would produce.
+	collExpr, bindName, predicate, err := splitFormArgs("filter", call)
+	if err != nil {
+		return nil, true, err
+	}
+
 	// Stream the collection via reflect rather than materializing it
 	// through iterItems — for filter(xs, p)[0] over a 1000-element
 	// slice, the unstreamed path allocates 1000 any-boxes only to
 	// throw 999 of them away.
-	coll, err := p.eval(ctx, call.Args[0], env, depth)
+	coll, err := p.eval(ctx, collExpr, env, depth)
 	if err != nil {
 		return nil, true, err
 	}
@@ -1323,15 +1332,15 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		return nil, true, fmt.Errorf("%w: filter expects a list as its first argument, got %T",
 			ErrEvaluate, coll)
 	}
-	scope := &itEnv{parent: env}
+	scope := &itEnv{parent: env, name: bindName}
 	var seen int64
 	for i := 0; i < rv.Len(); i++ {
 		item := rv.Index(i).Interface()
 		scope.it = item
 		scope.index = int64(i)
-		v, err := p.eval(ctx, call.Args[1], scope, depth)
+		v, err := p.eval(ctx, predicate, scope, depth)
 		if err != nil {
-			return nil, true, wrapPredicateErr("filter", call.Args[1], i, err)
+			return nil, true, wrapPredicateErr("filter", predicate, i, err)
 		}
 		if !isTruthy(v) {
 			continue

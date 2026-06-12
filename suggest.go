@@ -193,7 +193,7 @@ func availableFields(recv any, fieldTags *structTagConfig) []string {
 		return out
 	}
 	if it, ok := recv.(*itEnv); ok {
-		out := []string{"it", "index"}
+		out := []string{it.elementName(), "index"}
 		return append(out, availableFields(it.parent, fieldTags)...)
 	}
 	rv := reflect.ValueOf(recv)
