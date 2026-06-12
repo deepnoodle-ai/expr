@@ -701,3 +701,33 @@ func TestGuide_Templates_ErrorsReportLineColumn(t *testing.T) {
 		t.Fatalf("expected line:col in error, got %v", rerr)
 	}
 }
+
+// --- higher-order-patterns.md: pipelines --------------------------------------
+
+func TestGuide_HigherOrder_Pipelines(t *testing.T) {
+	// higher-order-patterns.md: `a | f(x)` is exactly `f(a, x)`, for
+	// both the two-arg and named-binding shapes.
+	orders := []any{
+		map[string]any{"id": "a-1", "status": "paid", "total": int64(50)},
+		map[string]any{"id": "b-2", "status": "open", "total": int64(10)},
+		map[string]any{"id": "c-3", "status": "paid", "total": int64(70)},
+	}
+	env := map[string]any{"orders": orders}
+	opts := []Option{WithBuiltins()}
+
+	piped := runGuide(t, `orders | filter(it.status == "paid") | map(it.id)`, env, opts...)
+	nested := runGuide(t, `map(filter(orders, it.status == "paid"), it.id)`, env, opts...)
+	assertDeepEqual(t, piped, nested)
+	assertDeepEqual(t, piped, []any{"a-1", "c-3"})
+
+	named := runGuide(t, `orders | filter(o, o.status == "paid") | map(o, {o.id: o.total})`, env, opts...)
+	assertDeepEqual(t, named, []any{
+		map[string]any{"a-1": int64(50)},
+		map[string]any{"c-3": int64(70)},
+	})
+
+	// The guide claims a bare (non-call) right side is a compile error.
+	if _, err := Compile(`xs | trim`, opts...); err == nil {
+		t.Fatal("expected non-call pipe right side to fail compilation")
+	}
+}

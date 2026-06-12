@@ -27,9 +27,11 @@ func TestValidate_RejectsAtCompile(t *testing.T) {
 		{"chan_recv", "<-c", "channel receive"},
 		{"bitwise_not", "^x", "bitwise complement"},
 
-		// Binary (bitwise)
+		// Binary (bitwise). `|` is the pipe operator, so a non-call
+		// right side gets the pipe message rather than a bitwise one
+		// (see pipe_test.go).
 		{"bitwise_and", "1 & 2", "bitwise"},
-		{"bitwise_or", "1 | 2", "bitwise"},
+		{"pipe_non_call", "1 | 2", "pipe operator | requires a function call"},
 		{"bitwise_xor", "1 ^ 2", "bitwise"},
 		{"shift_left", "1 << 2", "bitwise"},
 		{"shift_right", "1 >> 2", "bitwise"},

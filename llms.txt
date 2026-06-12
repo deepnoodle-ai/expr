@@ -17,9 +17,10 @@ language reference is [`docs/reference/spec.md`](docs/reference/spec.md).
   no function definitions. An expression takes an environment and
   produces a value.
 - **Parsed by `go/parser.ParseExpr`.** The accepted grammar is a strict
-  subset of Go expression syntax, with two ergonomic extensions: bare
-  `[...]` becomes `[]any{...}` and bare `{"k": v}` becomes
-  `map[string]any{"k": v}`.
+  subset of Go expression syntax, with a few ergonomic extensions: bare
+  `[...]` becomes `[]any{...}`, bare `{"k": v}` becomes
+  `map[string]any{"k": v}`, `?.` / `?[` are optional access, and
+  `a | f(x)` is the pipeline `f(a, x)`.
 - **Walked, not compiled.** expr visits the `ast.Expr` directly. There is
   no bytecode, no VM, no optimizer. This is deliberate — the whole
   library is ~3.9k non-test Go LOC.
@@ -28,7 +29,7 @@ language reference is [`docs/reference/spec.md`](docs/reference/spec.md).
   caps total nodes evaluated per Run so hostile nesting fails
   deterministically. Bitwise ops, pointer ops, channel ops, spread
   args, type assertions, and function literals are all rejected at
-  eval time.
+  Compile time.
 - **Loosely typed at runtime.** Integers are `int64`, floats are
   `float64`, numeric comparisons mix freely, and truthiness covers
   nil/false/zero/empty-string/empty-collection.
@@ -219,6 +220,35 @@ There is no `??` operator. Use `?.` / `?[` with operand-returning
 `||` for nil-or-fallback, and `try(x, default)` when the LHS may be
 a meaningful falsey value you want to keep.
 
+## Pipeline operator
+
+`a | f(x, y)` compiles exactly as `f(a, x, y)`: the left side becomes
+the first argument of the right-side call, and chains read left to
+right. The rewrite is purely compile-time and composes with every call
+shape, including the higher-order forms (both arities) and `try`/`if`:
+
+```
+checks | filter(!it.ok) | map(it.name) | join(", ")
+// identical to: join(map(filter(checks, !it.ok), it.name), ", ")
+orders | filter(o, o.paid) | sortBy(o, o.total)
+user?.name | upper()            // upper(user?.name); nil pipes as nil
+value | try("fallback")         // try(value, "fallback"), still lazy
+```
+
+Rules to remember:
+
+- `|` was rejected as bitwise or before v1.2.0, so the pipe changed
+  the meaning of no previously-compilable expression.
+- The right side must be written as a call: `xs | trim()` works,
+  `xs | trim` is ErrCompile with a "did you mean trim(...)?" hint.
+- `|` binds at `+`/`-` precedence: tighter than `==` and `&&`, so
+  `xs | count(it > 1) == 2` compares the piped count. A bare pipe on
+  the *right* of a comparison (`a == b | f()`) is an ErrCompile
+  demanding parentheses, because it would silently parse as
+  `a == f(b)`.
+- Postfix binds tighter: indexing or `?.` on a pipe result needs
+  parens: `(xs | find(it.ok))?.name`.
+
 ## Custom functions
 
 ```go
@@ -367,7 +397,8 @@ across multiple lines, every continuation line **must end with an
 operator, comma, or opening bracket** — never with an identifier,
 literal, or closing `)` / `]` / `}`. The safe continuations are
 `&&`, `||`, `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`,
-`,`, `(`, `[`, `{`. Multi-line call arguments can use trailing commas.
+`,`, `(`, `[`, `{`, and a trailing `|`.
+Multi-line call arguments can use trailing commas.
 See `docs/guides/examples.md` for worked multi-line expressions.
 
 ## Loose semantics worth remembering
@@ -436,12 +467,13 @@ expr will not silently leak goroutines to make cancellation look nicer.
 
 ## What is *not* supported
 
-These parse but error at eval time, so the "did I use a feature expr
-doesn't have?" answer is always readable:
+These parse but are rejected at Compile time with `ErrCompile`, so the
+"did I use a feature expr doesn't have?" answer is always readable:
 
 - Slice expressions (`x[a:b]`, `x[a:b:c]`)
 - Type assertions (`x.(T)`)
-- Bitwise operators (`& | ^ << >> &^`)
+- Bitwise operators (`& ^ << >> &^`); `|` is the pipeline operator,
+  and a `|` whose right side is not a call is rejected
 - Pointer/address ops (`*x`, `&x`)
 - Channel ops (`<-ch`, `ch <- v`)
 - Imaginary literals (`1i`)

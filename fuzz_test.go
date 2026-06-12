@@ -79,6 +79,18 @@ var fuzzCorpus = []string{
 	"?.x",
 	"a?.",
 	"a?[",
+	// pipe operator
+	"state.items | len()",
+	`state.name | upper() | lower()`,
+	"state.items | filter(it > 1) | map(it * 2)",
+	"state.user?.name | upper()",
+	`"a|b" | upper()`,
+	"1 | 2",
+	"state.items | foo",
+	"state.items | a?.b",
+	"state.items | (len())",
+	"state.items | len() > 2",
+	"1 + 2 | len()",
 }
 
 // fuzzEnv is the environment FuzzEval runs every mutated expression

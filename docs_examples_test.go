@@ -479,3 +479,40 @@ func TestDocsExample10_GuardedMathAndGroups(t *testing.T) {
 	}
 	assertDeepEqual(t, got, want)
 }
+
+// Example 13: Pipelines.
+func TestDocsExample13_Pipelines(t *testing.T) {
+	src := `events |
+  filter(it.kind == "error") |
+  map(sprintf("[%s] %s", it.source, it.message)) |
+  join("\n")`
+	env := map[string]any{
+		"events": []any{
+			map[string]any{"kind": "error", "source": "api", "message": "timeout"},
+			map[string]any{"kind": "info", "source": "api", "message": "ok"},
+			map[string]any{"kind": "error", "source": "db", "message": "deadlock"},
+		},
+	}
+	opts := []Option{WithBuiltins(), WithFunctions(StringFuncs())}
+	got := runDocExample(t, src, env, opts...)
+	assertDeepEqual(t, got, "[api] timeout\n[db] deadlock")
+
+	// The doc claims the pipe is sugar for the nested call form.
+	nested := runDocExample(t,
+		`join(map(filter(events, it.kind == "error"), sprintf("[%s] %s", it.source, it.message)), "\n")`,
+		env, opts...)
+	assertDeepEqual(t, got, nested)
+
+	// The doc claims a bare (non-call) right side is a compile error.
+	if _, err := Compile(`xs | len`, WithBuiltins()); err == nil {
+		t.Fatal("expected non-call pipe right side to fail compilation")
+	}
+
+	// The doc claims "pipe first, compare after": the left-of-comparison
+	// order works, the right-of-comparison order is a compile error.
+	got = runDocExample(t, `events | count(it.kind == "error") == 2`, env, opts...)
+	assertDeepEqual(t, got, true)
+	if _, err := Compile(`a == b | upper()`, opts...); err == nil {
+		t.Fatal("expected ambiguous pipe-right-of-comparison to fail compilation")
+	}
+}

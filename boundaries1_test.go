@@ -1244,7 +1244,7 @@ func TestSyntax_UnsupportedNodesAllReject(t *testing.T) {
 		"*p",       // unary * (unsupported token)
 		"&x",       // address-of
 		"1 & 2",    // bitwise AND
-		"1 | 2",    // bitwise OR
+		"1 | 2",    // pipe with non-call right side
 		"1 ^ 2",    // bitwise XOR
 		"1 << 2",   // shift left
 		"1 >> 2",   // shift right

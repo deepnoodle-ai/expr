@@ -49,7 +49,15 @@ func validate(fset *token.FileSet, node ast.Expr) error {
 				return err
 			}
 			return validate(fset, n.Y)
-		case token.AND, token.OR, token.XOR, token.SHL, token.SHR, token.AND_NOT:
+		case token.OR:
+			// `|` is the pipe operator; pipe nodes are desugared into
+			// calls (or rejected with a pipe-specific message) before
+			// validation ever runs, so a surviving OR node means a
+			// caller bypassed the rewrite. Repeat the rewrite's own
+			// rejection so the message matches either way.
+			return validateErr(fset, n.OpPos,
+				"pipe operator | requires a function call on the right-hand side")
+		case token.AND, token.XOR, token.SHL, token.SHR, token.AND_NOT:
 			return validateErr(fset, n.OpPos, "bitwise operator %s is not supported", n.Op)
 		}
 		return validateErr(fset, n.OpPos, "unsupported binary operator %s", n.Op)

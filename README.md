@@ -175,6 +175,26 @@ else)` evaluates only the branch the condition selects, so `if(n != 0, total/n,
 needed), but you can shadow any of them by registering a function or env value
 of the same name.
 
+## Pipelines
+
+The pipe operator `a | f(x)` compiles as `f(a, x)`, so chained
+transformations read left to right instead of inside out:
+
+```go
+p, err := expr.Compile(
+    `checks | filter(!it.ok) | map(it.name) | join(", ")`,
+    expr.WithBuiltins(),
+    expr.WithFunctions(expr.StringFuncs()),
+)
+```
+
+The pipe is compile-time sugar over ordinary calls, so it composes with
+everything above: builtins, your registered functions, and the
+higher-order forms in both shapes. In Go this token means bitwise or,
+which expr has always rejected, so the pipe changed the meaning of no
+existing expression. Design rationale lives in
+[RFC 0001](docs/rfcs/0001-pipe-operator.md).
+
 ## What it isn't
 
 `expr` evaluates a **single expression**. No statements, no `:=`, no

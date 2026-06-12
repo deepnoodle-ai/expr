@@ -149,6 +149,29 @@ map(
 )
 ```
 
+## Pipelines: the same chains, left to right
+
+`a | f(x)` compiles as `f(a, x)`, so a filter-then-map chain can read
+in execution order instead of inside out:
+
+```
+orders | filter(it.status == "paid") | map(it.id)
+```
+
+This is purely compile-time sugar over the nested form above. The
+forms, bindings, and laziness rules are identical, and the three-arg
+named-binding shape composes the same way:
+
+```
+orders | filter(o, o.status == "paid") | map(o, {o.id: o.total})
+```
+
+The right side of each `|` must be written as a call (`xs | trim()`,
+not `xs | trim`), and a pipe on the right-hand side of a comparison
+must be parenthesized. Precedence details live in the
+[spec](../reference/spec.md#pipeline-); a worked example is in
+[examples.md](examples.md#13-pipelines).
+
 ## Nested forms and the `it` rebinding rule
 
 Inside a nested two-arg higher-order form, `it` and `index` always refer
