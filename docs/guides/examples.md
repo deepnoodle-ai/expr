@@ -202,11 +202,17 @@ map[string]any{
 }
 ```
 
-Caveat worth knowing: inside a nested higher-order form, `it` and
-`index` always refer to the **innermost** form's current element.
-There is no `let` or outer-binding. If you need to reference both
-the outer element and inner element in the same predicate, stop
-nesting and do the join in Go, or register a helper function.
+Named bindings let you reference the outer element by name from inside
+an inner body:
+
+```
+filter(entries(scores), e, e.value >= 80)
+```
+
+Caveat for the two-arg form: inside a nested two-arg higher-order form,
+`it` and `index` always refer to the **innermost** form's current
+element. The outer `it` is shadowed. Use named bindings to keep both
+visible.
 
 ---
 
@@ -238,11 +244,11 @@ map[string]any{
 }
 ```
 
-The `${...}` result is stringified via `fmt.Sprintf("%v", ...)`, so a
-`[]any` of strings prints as a Go slice. For real templating of lists,
-either build the final string with `sprintf` in a single expression, or
-join the list in the host program and interpolate the joined string back
-in through the env.
+Maps, slices, arrays, and structs render as compact JSON inside `${...}`:
+`${files}` produces `["a.go","b.go"]`, not `[a.go b.go]`. For
+variable-length lists rendered as human-readable text, register a `join`
+helper and call it from the expression, or join in Go and pass the result
+through the env.
 
 ---
 
@@ -345,33 +351,49 @@ a redeploy. That's the entire pitch for an embedded expression language.
 
 ---
 
-## 8. Extracting + sorting via a registered function
+## 8. Extracting + sorting
 
-Higher-order forms don't include `sort`, on purpose — sorting needs
-stable comparators and expr stays out of that business. Register a Go
-function instead:
+`sortBy` is a built-in special form. It evaluates a key expression per
+element and returns a stable-sorted copy of the list. Combined with
+`filter` and a registered `take`:
 
 ```go
 take(
     sortBy(
         filter(users, it.active),
-        "age",
+        it.age,
     ),
     3,
 )
 ```
 
-Host-side registration:
+Or with the named-binding form for clarity:
+
+```go
+take(
+    sortBy(
+        filter(users, u, u.active),
+        u,
+        u.age,
+    ),
+    3,
+)
+```
+
+Host-side `take` registration:
 
 ```go
 expr.WithFunctions(map[string]any{
-    "sortBy": func(xs []any, key string) []any { ... },
-    "take":   func(xs []any, n int) []any { ... },
+    "take": func(xs []any, n int) []any { ... },
 })
 ```
 
-The philosophy: if expr doesn't have it, register a Go function for it.
-Don't fight the language.
+`sortBy` keys must be all numbers or all strings. For descending order,
+compose with `reverse` from `CollectionFuncs`:
+
+```go
+reverse(sortBy(users, u, u.age))
+```
 
 ---
 
@@ -444,3 +466,91 @@ p, err := expr.Compile(src,
 
 With an empty `prices` list, `avg_price` is `0` rather than a
 division-by-zero error — the untaken branch never runs.
+
+---
+
+## 11. Named bindings and flatMap
+
+Named element bindings let you refer to the outer element by name from
+inside a nested form body. `flatMap` flattens one level of nesting.
+
+```go
+// Extract all order IDs from all users using flatMap with a named binding.
+flatMap(users, u, u.orders)
+```
+
+Env:
+
+```go
+map[string]any{
+    "users": []any{
+        map[string]any{"orders": []any{int64(1), int64(2)}},
+        map[string]any{"orders": []any{int64(3)}},
+    },
+}
+```
+
+Result: `[]any{1, 2, 3}`.
+
+Nested named forms — the outer `r` stays visible inside the inner body
+because the inner named form does not bind `it`:
+
+```go
+map(reviews, r, join(map(r.comments, c, r.author + ": " + c), "; "))
+```
+
+Env:
+
+```go
+map[string]any{
+    "reviews": []any{
+        map[string]any{"author": "ann", "comments": []any{"good", "clear"}},
+        map[string]any{"author": "bob", "comments": []any{"ok"}},
+    },
+}
+```
+
+Result (requires `WithFunctions(expr.StringFuncs())`):
+`[]any{"ann: good; ann: clear", "bob: ok"}`.
+
+---
+
+## 12. entries, sort, and reverse
+
+`entries(m)` makes maps iterable through higher-order forms. `sort` and
+`reverse` (from `CollectionFuncs`) sort and reverse lists.
+
+```go
+// Format all response headers as "key: value", sorted by key.
+map(entries(headers), e, sprintf("%s: %s", e.key, e.value))
+```
+
+Env:
+
+```go
+map[string]any{
+    "headers": map[string]any{
+        "content-type":   "application/json",
+        "x-request-id":   "abc123",
+    },
+}
+```
+
+Result: `[]any{"content-type: application/json", "x-request-id: abc123"}`.
+
+```go
+// Keep only entries whose value exceeds a threshold.
+filter(entries(scores), e, e.value > 80)
+```
+
+`sort` and `reverse` require `WithFunctions(expr.CollectionFuncs())`:
+
+```go
+// Sort numbers ascending, then reverse for descending.
+reverse(sort([3, 1, 2]))   // → [3, 2, 1]
+sort(["banana", "apple"])  // → ["apple", "banana"]
+```
+
+`sort` accepts all-numbers or all-strings; mixed types produce
+`ErrEvaluate`. It never mutates the input and returns a fresh `[]any`.
+`reverse` works on any list type and also returns a fresh copy.

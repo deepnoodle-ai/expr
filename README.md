@@ -60,7 +60,9 @@ out, err := tmpl.Render(ctx, env)
 
 The text outside `${...}` is just text. The expression inside can use the same
 selectors, functions, literals, and higher-order forms as any other compiled
-expression.
+expression. `nil` renders as the empty string; maps, slices, arrays, and
+structs render as compact JSON (`${config}` produces `{"retries":3}`, not
+`map[retries:3]`).
 
 ## Using the Go API
 
@@ -90,9 +92,11 @@ safe to share between goroutines. Compile at startup. Run per request.
 
 No functions are registered by default, so the surface area is exactly as wide
 as you want it. `WithBuiltins()` opts you into a small standard set (`len`,
-`contains`, `has`, `keys`, `upper`, `lower`, `int`, `float`, `string`, `bool`,
-`sprintf`). `WithFunctions` lets you register any Go function as a callable
-identifier:
+`contains`, `has`, `keys`, `entries`, `upper`, `lower`, `int`, `float`,
+`string`, `bool`, `sprintf`). `entries(m)` returns the sorted key-value pairs
+of a string-keyed map as `[{"key":k,"value":v}, ...]`, making maps iterable
+through higher-order forms. `WithFunctions` lets you register any Go function
+as a callable identifier:
 
 ```go
 p, err := expr.Compile(`greet(upper(name))`, expr.WithFunctions(map[string]any{
@@ -105,8 +109,8 @@ Mix and match, or skip the builtins entirely and expose only the handful that
 make sense for your sandbox. Opt-in groups — `expr.MathFuncs()` (`min`, `max`,
 `abs`, `floor`, `ceil`, `round`), `expr.StringFuncs()` (`trim`, `split`,
 `join`, `replace`, `startsWith`, `endsWith`), and `expr.CollectionFuncs()`
-(`first`, `last`, `sum`, `slice`) — add the usual helpers via `WithFunctions`
-without widening the default set.
+(`first`, `last`, `sum`, `slice`, `sort`, `reverse`) — add the usual helpers
+via `WithFunctions` without widening the default set.
 
 ## What the environment can be
 
@@ -143,22 +147,33 @@ are left alone, so nothing you already had stops working.
 
 ## Higher-order forms
 
-A small set of always-available forms for working with lists: `map`, `filter`,
-`any`, `all`, `find`, `count`. Inside the second argument, `it` is the current
-element and `index` is its position:
+A set of always-available forms for working with lists: `map`, `filter`,
+`flatMap`, `any`, `all`, `find`, `count`, `sortBy`. Inside the body, `it` is
+the current element and `index` is its position:
 
 ```go
 p, err := expr.Compile(`filter(users, it.age >= 18 && index < 10)`)
 ```
 
-The predicate is re-evaluated per element, so they compose naturally:
-`any(orders, count(it.items, it.price > 100) > 0)`. Two more special forms
-use laziness for control flow instead of iteration: `try(value, default)`
-falls back when `value` errors, and `if(cond, then, else)` evaluates only the
-branch the condition selects — so `if(n != 0, total/n, 0)` can't divide by
-zero. These forms are always registered (no `WithBuiltins` needed), but you
-can shadow any of them by registering a function or env value of the same
-name.
+Every iterating form also accepts a three-argument shape that names the element
+explicitly, which makes nested forms readable and lets you reference an outer
+element from inside an inner body:
+
+```go
+// Named bindings: r is the review, c is the comment.
+map(reviews, r, map(r.comments, c, r.author + ": " + c))
+```
+
+`flatMap` works like `map` but splices list body results element-by-element
+into the output, which flattens one level of nesting. `sortBy` evaluates a key
+expression per element and returns a stable-sorted copy of the list.
+
+Two more special forms use laziness for control flow instead of iteration:
+`try(value, default)` falls back when `value` errors, and `if(cond, then,
+else)` evaluates only the branch the condition selects, so `if(n != 0, total/n,
+0)` can't divide by zero. These forms are always registered (no `WithBuiltins`
+needed), but you can shadow any of them by registering a function or env value
+of the same name.
 
 ## What it isn't
 

@@ -66,15 +66,23 @@ const MaxEvalDepth = 256
 // WithBuiltins for any shared name.
 type Option func(*compileConfig)
 
-// compileConfig is the resolved set of options for a single Compile.
-// It is consumed during parsing to build the function dispatch tables
-// baked into the resulting Program.
+// compileConfig is the resolved set of options for a single Compile
+// or NewTemplate. It is consumed during parsing to build the function
+// dispatch tables baked into the resulting Program. The tmpl* fields
+// are consumed only by NewTemplate; Compile rejects options that set
+// them (tracked in templateOnly) so a misplaced template option fails
+// at load time instead of being silently ignored.
 type compileConfig struct {
 	funcs      map[string]any
 	prepared   map[string]*preparedFunc
 	fieldTags  *structTagConfig
 	evalBudget int
 	errs       []error
+
+	tmplOpen      string
+	tmplClose     string
+	tmplFormatter func(v any) (string, bool)
+	templateOnly  []string
 }
 
 func newCompileConfig() *compileConfig {
@@ -174,13 +182,25 @@ func WithFieldTags(names ...string) Option {
 // Program. JSON-style array and object literals ([1, 2, 3], {"k": v}) are
 // always accepted; see docs/reference/spec.md for the exact rules.
 func Compile(code string, opts ...Option) (*Program, error) {
-	if len(code) > MaxSourceLength {
-		return nil, fmt.Errorf("%w: source length %d exceeds maximum %d",
-			ErrCompile, len(code), MaxSourceLength)
-	}
 	cfg := newCompileConfig()
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if len(cfg.templateOnly) > 0 {
+		return nil, fmt.Errorf("%w: %s applies only to NewTemplate",
+			ErrCompile, strings.Join(cfg.templateOnly, ", "))
+	}
+	return compileWithConfig(code, cfg)
+}
+
+// compileWithConfig compiles code against an already-resolved option
+// set. NewTemplate uses it to compile every `${...}` segment without
+// re-applying the option closures per segment (and without tripping
+// the template-only option check that guards Compile).
+func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
+	if len(code) > MaxSourceLength {
+		return nil, fmt.Errorf("%w: source length %d exceeds maximum %d",
+			ErrCompile, len(code), MaxSourceLength)
 	}
 	if len(cfg.errs) > 0 {
 		return nil, fmt.Errorf("%w: %w", ErrCompile, errors.Join(cfg.errs...))

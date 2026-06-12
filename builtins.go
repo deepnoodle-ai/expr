@@ -29,6 +29,8 @@ import (
 //	                  key presence for string-keyed maps
 //	has(m, k)         true if map m has key k; errors if m is not a map
 //	keys(m)           sorted string keys of a map
+//	entries(m)        sorted key-value pairs of a string-keyed map; each
+//	                  element is map[string]any{"key": k, "value": v}
 //	lower(s), upper(s)  case conversion
 //	sprintf(fmt, ...) fmt.Sprintf-style formatting with cycle guards
 //
@@ -46,6 +48,7 @@ func Builtins() map[string]any {
 		"contains": Func(nativeContains),
 		"has":      Func(nativeHas),
 		"keys":     Func(nativeKeys),
+		"entries":  Func(nativeEntries),
 		"lower":    Func(nativeLower),
 		"upper":    Func(nativeUpper),
 		"sprintf":  Func(nativeSprintf),
@@ -114,6 +117,13 @@ func nativeKeys(_ context.Context, args []any) (any, error) {
 		return nil, err
 	}
 	return builtinKeys(args[0])
+}
+
+func nativeEntries(_ context.Context, args []any) (any, error) {
+	if err := checkArity("entries", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinEntries(args[0])
 }
 
 func nativeLower(_ context.Context, args []any) (any, error) {
@@ -304,6 +314,32 @@ func builtinKeys(m any) ([]any, error) {
 	out := make([]any, len(strs))
 	for i, s := range strs {
 		out[i] = s
+	}
+	return out, nil
+}
+
+// builtinEntries returns the key-value pairs of a string-keyed map as a
+// []any, sorted by key for determinism. Each element is a
+// map[string]any{"key": k, "value": v}, mirroring the sort and key-type
+// rules of builtinKeys.
+func builtinEntries(m any) ([]any, error) {
+	if m == nil {
+		return nil, nil
+	}
+	rv := reflect.ValueOf(m)
+	if rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+		return nil, fmt.Errorf("%w: entries: expected map with string keys, got %T", ErrEvaluate, m)
+	}
+	mapKeys := rv.MapKeys()
+	strs := make([]string, len(mapKeys))
+	for i, k := range mapKeys {
+		strs[i] = k.String()
+	}
+	sort.Strings(strs)
+	out := make([]any, len(strs))
+	for i, s := range strs {
+		val := rv.MapIndex(mapStringKey(rv.Type().Key(), s)).Interface()
+		out[i] = map[string]any{"key": s, "value": val}
 	}
 	return out, nil
 }

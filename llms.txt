@@ -110,6 +110,7 @@ registered yourself. This keeps the sandbox surface as narrow as you want.
 | `contains(h, n)`  | `(any, any) -> bool`           | Substring, element, or map-key presence                   |
 | `has(m, k)`       | `(any, string) -> bool`        | Key presence on a map (nil → false)                       |
 | `keys(m)`         | `(any) -> []any`               | Sorted string keys                                         |
+| `entries(m)`      | `(any) -> []any`               | Sorted key-value pairs: `[{"key":k,"value":v}, ...]`; string-keyed maps only; nil → nil |
 | `upper(s)`        | `(string) -> string`           | `strings.ToUpper`                                          |
 | `lower(s)`        | `(string) -> string`           | `strings.ToLower`                                          |
 | `sprintf(f, ...)` | `(string, ...any) -> string`   | `fmt.Sprintf`                                              |
@@ -124,26 +125,48 @@ Opt-in helper groups (register with `WithFunctions`, kept out of
   `replace(s, old, new)`, `startsWith(s, p)`, `endsWith(s, p)`
 - `expr.CollectionFuncs()` — `first(xs)`, `last(xs)` (nil for empty),
   `sum(xs)` (int64 unless a float appears), `slice(xs, i, j)`
-  (half-open, negative indices from end, clamps; lists and strings)
+  (half-open, negative indices from end, clamps; lists and strings),
+  `sort(xs)` (ascending stable copy; all-numbers or all-strings; never
+  mutates input; nil/empty → `[]any{}`),
+  `reverse(xs)` (reversed copy; never mutates; nil/empty → `[]any{}`)
 
 ## Higher-order forms (always registered)
 
-The second argument is a predicate AST that is re-evaluated per element
-with `it` (current element) and `index` (0-based position) in scope.
-These shadow any outer identifier of the same name. `list` must be a
-slice, array, or nil (maps are not iterated — drive with `keys(m)` if
-you need to).
+Every iterating form accepts two call shapes:
 
-| Form                  | Returns          | Description                                           |
-| --------------------- | ---------------- | ----------------------------------------------------- |
-| `map(list, expr)`     | `[]any`          | Transform every element                               |
-| `filter(list, pred)`  | `[]any`          | Keep elements matching predicate                      |
-| `any(list, pred)`     | `bool`           | True if any match (short-circuits)                    |
-| `all(list, pred)`     | `bool`           | True if all match (empty list → true, short-circuits) |
-| `find(list, pred)`    | element or `nil` | First match or nil                                    |
-| `count(list, pred)`   | `int64`          | Number of matches                                     |
-| `try(value, default)` | value or default | `value` if it evaluates cleanly, else `default`       |
-| `if(cond, then, else)`| branch value     | Lazy ternary: only the selected branch evaluates      |
+```
+form(list, body)         // two-arg: binds `it` (element) and `index` (int64, 0-based)
+form(list, name, body)   // three-arg: binds `name` and `index`; `it` is NOT bound
+```
+
+Three-arg: the second argument is the element binding name (a plain
+identifier). Only `name` and `index` are bound; `it` from an enclosing
+two-arg form stays reachable. Reserved names (`it`, `index`, `true`,
+`false`, `nil`, `map`, `if`) produce ErrEvaluate.
+
+`list` must be a slice, array, or nil. Use `keys(m)` or `entries(m)` to
+iterate maps.
+
+| Form                         | Returns          | Description                                           |
+| ---------------------------- | ---------------- | ----------------------------------------------------- |
+| `map(list, expr)`            | `[]any`          | Transform every element                               |
+| `map(list, name, expr)`      | `[]any`          | Same, element bound as `name`                         |
+| `filter(list, pred)`         | `[]any`          | Keep elements matching predicate                      |
+| `filter(list, name, pred)`   | `[]any`          | Same, element bound as `name`                         |
+| `flatMap(list, expr)`        | `[]any`          | Like map; list results splice, nil splices as nothing, other values append whole; one level deep only; strings not split |
+| `flatMap(list, name, expr)`  | `[]any`          | Same, element bound as `name`                         |
+| `any(list, pred)`            | `bool`           | True if any match (short-circuits)                    |
+| `any(list, name, pred)`      | `bool`           | Same, element bound as `name`                         |
+| `all(list, pred)`            | `bool`           | True if all match (empty → true, short-circuits)      |
+| `all(list, name, pred)`      | `bool`           | Same, element bound as `name`                         |
+| `find(list, pred)`           | element or `nil` | First match or nil                                    |
+| `find(list, name, pred)`     | element or `nil` | Same, element bound as `name`                         |
+| `count(list, pred)`          | `int64`          | Number of matches                                     |
+| `count(list, name, pred)`    | `int64`          | Same, element bound as `name`                         |
+| `sortBy(list, key)`          | `[]any`          | Stable sorted copy by key expr; all-numbers or all-strings; mixed → ErrEvaluate; never mutates input |
+| `sortBy(list, name, key)`    | `[]any`          | Same, element bound as `name`                         |
+| `try(value, default)`        | value or default | `value` if it evaluates cleanly, else `default`       |
+| `if(cond, then, else)`       | branch value     | Lazy ternary: only the selected branch evaluates      |
 
 When a predicate inside an iterating form errors, the form wraps
 the error with its name, the predicate's source text, and the failing
@@ -153,25 +176,27 @@ add their own layer. The wrapping preserves the underlying chain so
 `errors.Is(err, ErrEvaluate)` still matches; cancellation passes
 through unchanged.
 
-`try` and `if` are the odd ones out: they do not iterate a list and
-bind no `it` or `index`. `try` traps anything wrapping `ErrEvaluate`
-(missing keys, nil selectors, out-of-range indices, `int`/`float`
-parse failures); its `default` runs only when the primary fails.
-`if(cond, then, else)` evaluates only the branch selected by `cond`'s
-truthiness, so `if(n != 0, total/n, 0)` cannot divide by zero.
-`try` does **not** trap raw `context.Canceled`,
+`try` and `if` do not iterate a list and bind no `it` or `index`.
+`try` traps anything wrapping `ErrEvaluate` (missing keys, nil selectors,
+out-of-range indices, `int`/`float` parse failures); its `default` runs
+only when the primary fails. `if(cond, then, else)` evaluates only the
+branch selected by `cond`'s truthiness, so `if(n != 0, total/n, 0)`
+cannot divide by zero. `try` does **not** trap `context.Canceled`,
 `context.DeadlineExceeded`, or anything wrapping `ErrCompile`.
 
 ```
 try(int(s), 0)                                       // parse with fallback
 try(find(events, it.kind == "purchase")?.user, "—")  // optional chain
 try(user.nickname, nil) || "(none)"                  // present nil
+flatMap(users, u, u.orders)                          // flatten orders per user
+sortBy(orders, o, o.total)                           // sort by field
+map(entries(headers), e, e.key + ": " + e.value)     // iterate a map
 ```
 
 Names can be shadowed by `WithFunctions` or an env entry of the same
-name. The literal token `map` is rewritten to an internal sentinel
-before parsing (Go treats `map` as a keyword), then translated back for
-error messages.
+name, three-arg calls included. The literal token `map` is rewritten to
+an internal sentinel before parsing (Go treats `map` as a keyword), then
+translated back for error messages.
 
 ## Optional access (`?.` and `?[`)
 
@@ -271,6 +296,55 @@ out, _ := t.Render(ctx, env)
 Each `${...}` is compiled once at construction time and re-evaluated on
 every `Render`. Outside of `${...}` the template text is literal.
 
+**Value rendering:** nil → empty string; string → passthrough; maps,
+slices, arrays, structs → compact JSON with HTML escaping disabled
+(`&`, `<`, `>` survive); a composite marshaling to a JSON string (e.g.
+`time.Time`) renders as the unquoted string; JSON-incompatible values
+(cycles, funcs) fall back to `fmt.Sprintf("%v", v)`. This is a
+**behavior change**: composite values previously rendered via
+`fmt.Sprintf("%v", v)` (e.g. `map[k:v]`), now render as JSON
+(`{"k":"v"}`).
+
+**`$$` escape:** `$$` → literal `$`. `$${name}` emits `${name}`.
+Applies only when the opener starts with `$`.
+
+**Custom delimiters (NewTemplate only):**
+```go
+expr.WithTemplateDelimiters("${{", "}}")   // GitHub Actions style
+expr.WithTemplateDelimiters("{{", "}}")    // Mustache style
+```
+Opener must end with one or more `{`; closer is the matching `}` run.
+Passing to `Compile` fails with `ErrCompile`.
+
+**Custom formatter (NewTemplate only):**
+```go
+expr.WithTemplateFormatter(func(v any) (string, bool) {
+    if t, ok := v.(time.Time); ok { return t.Format(time.Stamp), true }
+    return "", false
+})
+```
+Runs first for every interpolated value; return `false` to fall through.
+Passing to `Compile` fails with `ErrCompile`.
+
+**Error messages** include 1-based `line:column (offset N)`:
+```
+template: evaluating ${boom} at 3:3 (offset 21): ...
+```
+
+**`Template.Segments() []TemplateSegment`** — parsed segments in source
+order. Each `TemplateSegment` carries `Literal`, `Source`, `Offset`,
+`Line`, `Column`, and `Program` (compiled expression for expression
+segments, nil for literals). Call `Program.Identifiers()` per segment
+for editor hints or live validation.
+
+`Program.Identifiers()` returns the sorted, deduplicated env-resolved
+names the expression references. Excludes: `true`/`false`/`nil`;
+`it`/`index` bound by an enclosing iterating form; the named binding of
+a three-arg form (both the name itself and its body references); names
+registered via `WithFunctions`/`WithBuiltins`; special-form names in
+call position. `it` inside a three-arg form body IS included (the form
+does not bind it).
+
 ## JSON-style literals
 
 Bare `[...]` and `{"k": v}` are rewritten before parsing into
@@ -329,15 +403,18 @@ All parse failures wrap `ErrCompile`. All runtime failures wrap
 are wrapped so `errors.Is` and `errors.As` still find the original cause.
 Unknown identifiers, fields, and keys get a Levenshtein-based
 "did you mean...?" hint drawn from what's actually in scope.
-Higher-order forms (`map`, `filter`, `any`, `all`, `find`, `count`,
-`try`, `if`) referenced as bare identifiers get a tailored hint
-showing their call signature, e.g. `"count" is a special form, did
-you mean to call count(xs, predicate)?`.
+Higher-order forms (`map`, `filter`, `flatMap`, `any`, `all`, `find`,
+`count`, `sortBy`, `try`, `if`) referenced as bare identifiers get a
+tailored hint showing their call signature, e.g. `"count" is a special
+form, did you mean to call count(xs, predicate)?`.
 
 `Program.Identifiers()` returns the sorted set of env-resolved names
-the expression references (excluding literals, bound `it`/`index`,
-registered functions, and special forms) — useful for validating an
-expression against a known env shape at load time.
+the expression references. Excludes: literals, bound `it`/`index`,
+the named binding name and its body references in three-arg forms,
+registered functions, and special forms in call position. `it` inside
+a three-arg form body is included (the form does not bind it).
+Useful for validating an expression against a known env shape at load
+time or tracking dependency sets for cache invalidation.
 
 ```go
 if errors.Is(err, expr.ErrCompile) { /* ... */ }

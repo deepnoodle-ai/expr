@@ -125,3 +125,67 @@ func FuzzTemplateEval(f *testing.F) {
 		_ = out
 	})
 }
+
+// customDelimSeeds adapts the corpus to the delimiter styles
+// WithTemplateDelimiters enables, plus cases unique to multi-brace
+// openers (split closers, shell collisions, nested composites).
+var customDelimSeeds = []string{
+	"",
+	"plain ${HOME} text",
+	"${{x}}",
+	"${{ x }}",
+	"${{x}}${{y}}",
+	"pre ${{x}} post",
+	"$${{x}}",
+	"${{ map[string]any{\"k\": 1} }}",
+	"${{ {\"k\": 1} }}",
+	"${{ \"}}\" }}",
+	"${{ `}` }}",
+	"${{ a /* }} */ + b }}",
+	"${{a}}}} tail",
+	"${{a",
+	"${{",
+	"${{}}",
+	"${{   }}",
+	"${{ x }",
+	"${{ x } }",
+	"${ x }",
+	"{{x}}",
+	"\ufeff${{x}}",
+}
+
+// FuzzTemplateParseCustomDelims confirms the generalized scanner
+// holds the same invariants as FuzzTemplateParse when the opener
+// spans multiple braces ("${{"/"}}") and when it has no "$" prefix
+// ("{{"/"}}").
+func FuzzTemplateParseCustomDelims(f *testing.F) {
+	for _, s := range customDelimSeeds {
+		f.Add(s)
+	}
+	for _, s := range fuzzSeeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, src string) {
+		if !utf8.ValidString(src) {
+			t.Skip()
+		}
+		for _, delims := range [][2]string{{"${{", "}}"}, {"{{", "}}"}} {
+			tmpl, err := parseTemplateWith(src, delims[0], delims[1], acceptAllCompile)
+			if err != nil {
+				if !strings.HasPrefix(err.Error(), "template:") {
+					t.Fatalf("error missing template: prefix: %v", err)
+				}
+				continue
+			}
+			if tmpl == nil {
+				t.Fatalf("nil template with nil error for %q", src)
+			}
+			if got := tmpl.Source(); got != src {
+				t.Fatalf("Source() drift: got %q want %q", got, src)
+			}
+			if _, err := tmpl.Render(context.Background(), nil); err != nil {
+				t.Fatalf("Render error on accept-all compiler: %v", err)
+			}
+		}
+	})
+}

@@ -280,31 +280,16 @@ func TestDocsExample7_RBAC(t *testing.T) {
 	assertDeepEqual(t, got, want)
 }
 
-// Example 8: Extracting + sorting via a registered function.
-func TestDocsExample8_RegisteredSort(t *testing.T) {
+// Example 8: Extracting + sorting with the built-in sortBy form.
+func TestDocsExample8_SortBy(t *testing.T) {
+	// Two-arg form: sortBy key expression is `it.age`.
 	src := `take(
         sortBy(
             filter(users, it.active),
-            "age",
+            it.age,
         ),
         3,
     )`
-	sortBy := func(xs []any, key string) []any {
-		out := append([]any{}, xs...)
-		// stable insertion sort by numeric key
-		for i := 1; i < len(out); i++ {
-			for j := i; j > 0; j-- {
-				a := out[j-1].(map[string]any)[key]
-				b := out[j].(map[string]any)[key]
-				if toFloat(a) > toFloat(b) {
-					out[j-1], out[j] = out[j], out[j-1]
-				} else {
-					break
-				}
-			}
-		}
-		return out
-	}
 	take := func(xs []any, n int) []any {
 		if n > len(xs) {
 			n = len(xs)
@@ -313,23 +298,92 @@ func TestDocsExample8_RegisteredSort(t *testing.T) {
 	}
 	env := map[string]any{
 		"users": []any{
-			map[string]any{"name": "Ada", "age": 36, "active": true},
-			map[string]any{"name": "Alan", "age": 41, "active": false},
-			map[string]any{"name": "Grace", "age": 29, "active": true},
-			map[string]any{"name": "Linus", "age": 54, "active": true},
-			map[string]any{"name": "Mira", "age": 22, "active": true},
+			map[string]any{"name": "Ada", "age": int64(36), "active": true},
+			map[string]any{"name": "Alan", "age": int64(41), "active": false},
+			map[string]any{"name": "Grace", "age": int64(29), "active": true},
+			map[string]any{"name": "Linus", "age": int64(54), "active": true},
+			map[string]any{"name": "Mira", "age": int64(22), "active": true},
 		},
 	}
 	got := runDocExample(t, src, env,
 		WithBuiltins(),
-		WithFunctions(map[string]any{"sortBy": sortBy, "take": take}),
+		WithFunctions(map[string]any{"take": take}),
 	)
 	want := []any{
-		map[string]any{"name": "Mira", "age": 22, "active": true},
-		map[string]any{"name": "Grace", "age": 29, "active": true},
-		map[string]any{"name": "Ada", "age": 36, "active": true},
+		map[string]any{"name": "Mira", "age": int64(22), "active": true},
+		map[string]any{"name": "Grace", "age": int64(29), "active": true},
+		map[string]any{"name": "Ada", "age": int64(36), "active": true},
 	}
 	assertDeepEqual(t, got, want)
+
+	// Named-binding form: `sortBy(filter(...), u, u.age)`.
+	srcNamed := `take(
+        sortBy(
+            filter(users, u, u.active),
+            u,
+            u.age,
+        ),
+        3,
+    )`
+	got = runDocExample(t, srcNamed, env,
+		WithBuiltins(),
+		WithFunctions(map[string]any{"take": take}),
+	)
+	assertDeepEqual(t, got, want)
+}
+
+// Example 11: Named bindings and flatMap.
+func TestDocsExample11_NamedBindingsFlatMap(t *testing.T) {
+	env := map[string]any{
+		"users": []any{
+			map[string]any{"orders": []any{int64(1), int64(2)}},
+			map[string]any{"orders": []any{int64(3)}},
+		},
+		"reviews": []any{
+			map[string]any{"author": "ann", "comments": []any{"a1", "a2"}},
+			map[string]any{"author": "bob", "comments": []any{"b1"}},
+		},
+	}
+
+	// flatMap with named binding flattens orders per user.
+	got := runDocExample(t, `flatMap(users, u, u.orders)`, env)
+	assertDeepEqual(t, got, []any{int64(1), int64(2), int64(3)})
+
+	// Outer named, inner named: r.author stays visible inside inner body.
+	opts := []Option{WithBuiltins(), WithFunctions(StringFuncs())}
+	got = runDocExample(t, `map(reviews, r, join(map(r.comments, c, r.author + ": " + c), "; "))`, env, opts...)
+	assertDeepEqual(t, got, []any{"ann: a1; ann: a2", "bob: b1"})
+}
+
+// Example 12: entries, sort, and reverse.
+func TestDocsExample12_EntriesSortReverse(t *testing.T) {
+	env := map[string]any{
+		"headers": map[string]any{
+			"content-type": "application/json",
+			"x-request-id": "abc123",
+		},
+		"scores": map[string]any{
+			"alice": int64(90),
+			"bob":   int64(70),
+			"carol": int64(85),
+		},
+	}
+
+	// Format all response headers as "key: value", sorted by key.
+	got := runDocExample(t, `map(entries(headers), e, e.key + ": " + e.value)`, env)
+	assertDeepEqual(t, got, []any{"content-type: application/json", "x-request-id: abc123"})
+
+	// Keep only entries whose value exceeds a threshold.
+	got = runDocExample(t, `map(filter(entries(scores), e, e.value > 80), e, e.key)`, env)
+	assertDeepEqual(t, got, []any{"alice", "carol"})
+
+	// sort and reverse require CollectionFuncs.
+	collOpts := []Option{WithFunctions(CollectionFuncs())}
+	got = runDocExample(t, `reverse(sort([3, 1, 2]))`, nil, collOpts...)
+	assertDeepEqual(t, got, []any{int64(3), int64(2), int64(1)})
+
+	got = runDocExample(t, `sort(["banana", "apple"])`, nil, collOpts...)
+	assertDeepEqual(t, got, []any{"apple", "banana"})
 }
 
 func toFloat(v any) float64 {

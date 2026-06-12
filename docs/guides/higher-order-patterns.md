@@ -1,40 +1,85 @@
 # Higher-order patterns
 
-`map`, `filter`, `any`, `all`, `find`, `count` are the closest thing
-expr has to control flow over collections. There's no `for` and no
-`let`. These six forms, plus the lazy `if(cond, t, f)` special form
-(only the selected branch evaluates) and Go's short-circuit `&&` /
-`||`, are how you make decisions and shape data. This guide walks the idioms that come up most often and the
-ones you have to work around.
+`map`, `filter`, `flatMap`, `any`, `all`, `find`, `count`, and `sortBy`
+are the closest thing expr has to control flow over collections. There
+is no `for` and no `let`. These eight forms, plus the lazy `if(cond, t,
+f)` special form (only the selected branch evaluates) and Go's
+short-circuit `&&` / `||`, are how you make decisions and shape data.
+This guide walks the idioms that come up most often and the ones you
+have to work around.
 
 A runnable companion lives in
 [`../../examples/higher_order_patterns/`](../../examples/higher_order_patterns/).
 
 ## The shape of a higher-order form
 
+Every iterating form accepts two call shapes:
+
 ```
-form(list, predicate_or_transform)
+form(list, body)            // two-arg: binds `it` and `index`
+form(list, name, body)      // three-arg: binds `name` and `index`
 ```
 
-- `list` must be a slice, array, or `nil`. **Maps are not iterated.**
-  To iterate a map, drive with `keys(m)` and index into `m[k]` inside
-  the predicate.
-- The second argument is an **unevaluated AST** that the form
-  re-evaluates once per element. Inside that body, `it` is the
-  current element and `index` is its 0-based position. Both shadow
-  any outer identifier of the same name.
+- `list` must be a slice, array, or `nil`. **Maps are not iterated
+  directly.** Use `keys(m)` to iterate keys, or `entries(m)` to iterate
+  key-value pairs.
+- In the two-arg form, `it` is the current element and `index` is its
+  0-based position. Both shadow any outer identifier of the same name.
+- In the three-arg form, the second argument is the element binding name.
+  Only the chosen name and `index` are bound inside the body; `it` is
+  **not** bound, so an enclosing scope's `it` remains visible.
 
-These forms are **always registered**. `WithBuiltins()` is not
-required. You can shadow them by registering your own function of
-the same name, but you lose the per-element re-evaluation — see
-[registering-functions.md](registering-functions.md).
+These forms are **always registered**. `WithBuiltins()` is not required.
+You can shadow any of them by registering your own function of the same
+name, but you lose the per-element re-evaluation.
+
+## Named element bindings
+
+The three-arg form solves a problem the two-arg form cannot: nested
+forms where you need to refer to the outer element by name from inside
+an inner body.
+
+With the two-arg form only, the inner body shadows the outer `it`:
+
+```
+// Inside the inner map, `it` is a comment, not a review.
+// There is no way to refer to the review from inside this body.
+map(reviews, map(it.comments, it))  // it = comment here, review is gone
+```
+
+With named bindings, you choose which name is visible where:
+
+```
+// Outer two-arg, inner named: outer `it` (the review) stays visible
+// because the inner named form does not bind `it`.
+map(reviews, map(it.comments, c, it.author + "/" + c))
+//           ^^ outer `it` = review   ^^ inner `c` = comment
+
+// Outer named, inner two-arg: `r` (the review) is visible inside
+// the inner body alongside inner `it` (the comment).
+map(reviews, r, join(map(r.comments, r.author + "/" + it), ","))
+//           ^^ binds r                          ^^ inner `it` = comment
+```
+
+Named bindings shadow env names and outer bindings of the same name.
+An inner form that reuses a name hides the outer one for its body:
+
+```
+map(users, u, map(u.orders, u, u))   // inner u shadows outer u
+```
+
+### Reserved binding names
+
+You cannot use `it`, `index`, `true`, `false`, `nil`, `map`, or `if`
+as a binding name. Any of these produces an `ErrEvaluate: <form>
+binding cannot be named "<name>"`. A non-identifier in the name
+position produces `<form> binding must be a plain identifier, got ...`.
 
 ## Validation bags
 
-The canonical shape for "run a list of rules over an input and
-collect the ones that failed." Every rule is a
-`{ok, msg}` literal, you filter for failures, then project to the
-message.
+The canonical shape for "run a list of rules over an input and collect
+the ones that failed." Every rule is a `{ok, msg}` literal, you filter
+for failures, then project to the message.
 
 ```
 {
@@ -53,11 +98,10 @@ message.
 }
 ```
 
-Why this beats a flat `&&` chain: you get the failing reasons in
-order, every rule is a one-line edit, and adding a check is adding a
-row. The top-level `ok` still short-circuits — the engine doesn't
-build the error list unless you ask for it in the same composite
-literal.
+Why this beats a flat `&&` chain: you get the failing reasons in order,
+every rule is a one-line edit, and adding a check is adding a row. The
+top-level `ok` still short-circuits: the engine doesn't build the error
+list unless you ask for it in the same composite literal.
 
 This pattern generalizes to anywhere you want "a list of possibly-failing
 predicates with associated data." For example, validation with
@@ -66,8 +110,8 @@ severities: `{"ok": ..., "severity": "warn", "msg": "..."}`.
 ## Summary objects
 
 A single composite literal with many `count(...)` / `any(...)` /
-`find(...)` calls is the idiomatic way to build a stats object from
-a list:
+`find(...)` calls is the idiomatic way to build a stats object from a
+list:
 
 ```
 {
@@ -80,11 +124,10 @@ a list:
 }
 ```
 
-Every field is its own pass over the list, but the engine evaluates
-them in order inside the enclosing composite literal, so it reads
-like a single declarative summary. If you care about doing it in one
-pass, register a Go function that takes the list and returns the
-summary — don't fight expr.
+Every field is its own pass over the list, but the engine evaluates them
+in order inside the enclosing composite literal, so it reads like a
+single declarative summary. If you care about doing it in one pass,
+register a Go function that takes the list and returns the summary.
 
 ## Filter, then map
 
@@ -95,23 +138,21 @@ the field I care about" shape:
 map(filter(orders, it.status == "paid"), it.id)
 ```
 
-Reads as "the id of every paid order." Composes cleanly to any depth:
+Reads as "the id of every paid order." Named bindings make the elements
+explicit when nesting gets deep:
 
 ```
 map(
-    filter(users, it.active && len(it.roles) > 0),
-    upper(it.name),
+    filter(orders, o, o.status == "paid" && o.total > 100),
+    o,
+    {o.id: o.total},
 )
 ```
 
-The `it` in the outer `map` refers to *the element that passed the
-inner `filter`* — there is no confusion because the inner `filter`
-has already been reduced to a value before the outer `map` runs.
-
 ## Nested forms and the `it` rebinding rule
 
-Inside a nested higher-order form, `it` and `index` always refer to
-the **innermost** form's current element. The outer binding is gone.
+Inside a nested two-arg higher-order form, `it` and `index` always refer
+to the **innermost** form's current element. The outer binding is gone.
 
 ```
 count(orders, it.status == "paid" && count(it.items, it.price >= 100) >= 2)
@@ -120,20 +161,105 @@ count(orders, it.status == "paid" && count(it.items, it.price >= 100) >= 2)
 
 The outer `it.status` runs before the inner `count(it.items, ...)`
 starts, so the two references don't collide. But inside the inner
-predicate, `it` is an item, not an order. There is no way to spell
-"outer it" from inside the inner body.
+predicate, `it` is an item, not an order.
 
-## Why there's no `let`, and what to do instead
+Named bindings solve this when you need the outer element inside an
+inner body:
 
-People routinely ask for `let` or `with` to bind an intermediate
-value. expr doesn't have it, by design — every `let` would add a
-scope, and scopes are where expression languages start growing
-teeth. There are three workarounds depending on what you need.
+```
+// Before: no way to reference the review from inside the inner body.
+map(reviews, map(it.comments, it))
 
-**1. Duplicate the sub-expression.** If the value is cheap, just
-write it twice. The AST walker has per-element caching for many
-common subexpressions, but even without that, two reads of
-`user.profile.name` is usually fine.
+// After: r is the review, it is the comment.
+map(reviews, r, map(r.comments, c, sprintf("%s: %s", r.author, c)))
+```
+
+## flatMap: flatten and collect
+
+`flatMap(xs, body)` is like `map`, but body results that are lists get
+spliced into the output element-by-element. Use it to flatten a
+collection of collections, or to expand each element into zero or more
+output elements.
+
+```
+// Flatten orders-per-user into a single order list.
+flatMap(users, u, u.orders)
+
+// Two-arg form: same thing using `it`.
+flatMap(users, it.orders)
+```
+
+Splicing is one level deep only:
+
+```
+flatMap([1, [2, 3], 4], it)   // → [1, 2, 3, 4]
+flatMap([[1, [2]], [3]], it)  // → [1, [2], 3]  (inner list kept whole)
+```
+
+`nil` body results splice as nothing (the nil-is-an-empty-list rule):
+
+```
+flatMap([1, 2, 3], if(it > 1, [it, it], nil))  // → [2, 2, 3, 3]
+```
+
+Strings are never split into runes; they append as a single element:
+
+```
+flatMap(["ab", "c"], it)   // → ["ab", "c"]
+```
+
+## sortBy: stable sort by key
+
+`sortBy(xs, key)` evaluates the key expression once per element and
+returns a **new** list sorted in ascending order. The sort is stable:
+elements with equal keys preserve their input order. The input list is
+never mutated.
+
+```
+// Sort orders by total, ascending.
+sortBy(orders, it.total)
+
+// Named binding form.
+sortBy(orders, o, o.total)
+```
+
+Keys must be all numbers (any int/float mix) or all strings. Mixed or
+non-comparable key types produce an `ErrEvaluate` naming the offending
+element. Combined with `reverse` (from `CollectionFuncs`):
+
+```
+// Descending sort.
+reverse(sortBy(orders, o, o.total))
+```
+
+## Iterating maps with `entries`
+
+`entries(m)` (from `WithBuiltins`) returns the key-value pairs of a
+string-keyed map as a sorted `[]any`, each element being
+`map[string]any{"key": k, "value": v}`. It makes maps iterable through
+all the higher-order forms:
+
+```
+// Format all headers as "key: value".
+map(entries(headers), e, sprintf("%s: %s", e.key, e.value))
+
+// Keep only entries whose score is above 80.
+filter(entries(scores), e, e.value > 80)
+
+// Sort a map's entries by value.
+sortBy(entries(scores), e, e.value)
+```
+
+## Why there is no `let`, and what to do instead
+
+Named bindings scoped to a single form body cover the main pain point
+without general scoping machinery: the `o` in `filter(orders, o, ...)` is
+a one-form binding, not a declaration that leaks into siblings. If you
+need a value bound across a whole expression or across siblings of a
+composite literal, the answer is still to move it outside the expression.
+
+**1. Duplicate the sub-expression.** If the value is cheap, write it
+twice:
 
 ```
 {
@@ -142,10 +268,9 @@ common subexpressions, but even without that, two reads of
 }
 ```
 
-**2. Register a helper.** If you need the value bound across a whole
-subtree (a join on the outer element from inside a nested form, for
-example), register a Go function that takes both and returns the
-computed shape.
+**2. Register a helper.** If you need to combine the outer and inner
+elements in a way named bindings can't help with (e.g., you need both
+elements as arguments to a Go function), register the helper:
 
 ```go
 expr.WithFunctions(map[string]any{
@@ -158,8 +283,7 @@ ordersFor(orders, user.id)
 ```
 
 **3. Pre-compute in Go.** Move the binding out of the expression
-entirely. If your template needs `user.profile.name` three times,
-add it as an env key:
+entirely:
 
 ```go
 env := map[string]any{
@@ -169,10 +293,8 @@ env := map[string]any{
 }
 ```
 
-Expressions read `name` and `isAdmin` directly. You lose nothing
-except the ability to change the derivation from inside an
-expression — and if that mattered, you probably didn't want to
-precompute.
+Expressions read `name` and `isAdmin` directly. You lose nothing except
+the ability to change the derivation from inside an expression.
 
 ## `any` / `all` short-circuit, `count` does not
 
@@ -181,35 +303,34 @@ precompute.
 - `filter` and `map` run the predicate on every element.
 - `count` runs the predicate on every element (no early exit).
 - `find` returns as soon as a match is found.
+- `flatMap` and `sortBy` evaluate the body/key on every element.
 
-If you need "at least two matches," `count(list, pred) >= 2` is
-correct but iterates the whole list. For large lists where the
-cutoff matters, write the check as a function and register it.
+If you need "at least two matches," `count(list, pred) >= 2` is correct
+but iterates the whole list.
 
 ## Empty-list behavior
 
-| Form                  | On empty list                        |
-| --------------------- | ------------------------------------ |
-| `map(xs, it)`         | `[]any{}` (empty slice)              |
-| `filter(xs, pred)`    | `[]any{}`                            |
-| `any(xs, pred)`       | `false`                              |
-| `all(xs, pred)`       | `true` (vacuously)                   |
-| `find(xs, pred)`      | `nil`                                |
-| `count(xs, pred)`     | `0`                                  |
+| Form                   | On empty or nil list         |
+| ---------------------- | ---------------------------- |
+| `map(xs, it)`          | `[]any{}` (empty slice)      |
+| `filter(xs, pred)`     | `[]any{}`                    |
+| `flatMap(xs, it)`      | `[]any{}`                    |
+| `any(xs, pred)`        | `false`                      |
+| `all(xs, pred)`        | `true` (vacuously)           |
+| `find(xs, pred)`       | `nil`                        |
+| `count(xs, pred)`      | `0`                          |
+| `sortBy(xs, key)`      | `[]any{}`                    |
 
-`all([]) == true` is the usual mathematical convention and usually
-what you want for "every X must be valid" over a possibly-empty list.
-If you need "non-empty and all valid," spell it out:
+`all([]) == true` is the usual mathematical convention and usually what
+you want for "every X must be valid" over a possibly-empty list. If you
+need "non-empty and all valid," spell it out:
 `len(xs) > 0 && all(xs, pred)`.
 
 ## When to stop reaching for higher-order
 
-expr's higher-order set covers single-pass list operations. It does
-**not** cover grouping, sorting, or zipping. If you find yourself
-writing a `sort`-shaped expression, register a `sortBy` in Go and
-call it — see example 8 in [examples.md](examples.md). Same for
-group-by, reduce with accumulator, and anything that needs to bind
-values across iterations.
+expr's higher-order set covers single-pass list operations and sorting.
+It does **not** cover grouping, zipping, or reduce with an accumulator.
+If you find yourself needing those, register a Go function and call it.
 
-The rule: if it fits in one pass with a per-element predicate, use
-the forms. Otherwise, register a Go function.
+The rule: if it fits in one pass with a per-element predicate or key,
+use the forms. Otherwise, register a Go function.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 )
 
@@ -63,12 +64,17 @@ func StringFuncs() map[string]any {
 //	slice(xs, i, j)      elements [i, j) of a list, or the rune range
 //	                     of a string; negative indices count from the
 //	                     end and out-of-range bounds clamp
+//	sort(xs)             ascending copy; all numbers (numeric order) or
+//	                     all strings (lexicographic); mixed types error
+//	reverse(xs)          reversed copy; never mutates input
 func CollectionFuncs() map[string]any {
 	return map[string]any{
-		"first": Func(nativeFirst),
-		"last":  Func(nativeLast),
-		"sum":   Func(nativeSum),
-		"slice": Func(nativeSlice),
+		"first":   Func(nativeFirst),
+		"last":    Func(nativeLast),
+		"sum":     Func(nativeSum),
+		"slice":   Func(nativeSlice),
+		"sort":    Func(nativeSort),
+		"reverse": Func(nativeReverse),
 	}
 }
 
@@ -398,4 +404,111 @@ func resolveIndex(i int64, n int) int {
 		return n
 	}
 	return int(i)
+}
+
+func nativeSort(_ context.Context, args []any) (any, error) {
+	if err := checkArity("sort", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinSort(args[0])
+}
+
+// builtinSort returns a sorted copy of a list. All elements must be
+// either numbers (any int/float mix, compared with the same rules as
+// the < operator) or all strings (lexicographic). The sort is stable
+// and reorders the original elements without converting them: ints
+// stay ints, floats stay floats. Mixed or non-comparable element
+// types produce an ErrEvaluate. An empty or nil input returns an
+// empty []any.
+func builtinSort(v any) ([]any, error) {
+	if v == nil {
+		return []any{}, nil
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, fmt.Errorf("%w: sort: expected list, got %T", ErrEvaluate, v)
+	}
+	n := rv.Len()
+	out := make([]any, n)
+	for i := 0; i < n; i++ {
+		out[i] = rv.Index(i).Interface()
+	}
+	less, err := scalarLessFunc("sort", out)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, less)
+	return out, nil
+}
+
+// scalarLessFunc validates that every value in vals is a number (any
+// int/float mix) or that every value is a string, and returns the
+// matching index-based less function. The mode is chosen by the first
+// value; the error names the first value that does not fit. Shared by
+// sort and sortBy so the two agree on comparison semantics.
+func scalarLessFunc(name string, vals []any) (func(i, j int) bool, error) {
+	if len(vals) == 0 {
+		return func(i, j int) bool { return false }, nil
+	}
+	if _, ok := toFloat64(vals[0]); ok {
+		for i, v := range vals {
+			if _, ok := toFloat64(v); !ok {
+				return nil, fmt.Errorf("%w: %s: element %d is %T, not a number", ErrEvaluate, name, i, v)
+			}
+		}
+		return func(i, j int) bool { return numericLess(vals[i], vals[j]) }, nil
+	}
+	if _, ok := asString(vals[0]); ok {
+		for i, v := range vals {
+			if _, ok := asString(v); !ok {
+				return nil, fmt.Errorf("%w: %s: element %d is %T, not a string", ErrEvaluate, name, i, v)
+			}
+		}
+		return func(i, j int) bool {
+			a, _ := asString(vals[i])
+			b, _ := asString(vals[j])
+			return a < b
+		}, nil
+	}
+	return nil, fmt.Errorf("%w: %s: elements must be all numbers or all strings, got %T",
+		ErrEvaluate, name, vals[0])
+}
+
+// numericLess compares two numbers with the same rules as the <
+// operator: both integral values compare as int64, any other mix
+// compares as float64.
+func numericLess(a, b any) bool {
+	if ai, ok := toInt64(a); ok {
+		if bi, ok := toInt64(b); ok {
+			return ai < bi
+		}
+	}
+	af, _ := toFloat64(a)
+	bf, _ := toFloat64(b)
+	return af < bf
+}
+
+func nativeReverse(_ context.Context, args []any) (any, error) {
+	if err := checkArity("reverse", 1, len(args)); err != nil {
+		return nil, err
+	}
+	return builtinReverse(args[0])
+}
+
+// builtinReverse returns a reversed copy of a list. It never mutates
+// the input. nil and empty lists return an empty []any.
+func builtinReverse(v any) ([]any, error) {
+	if v == nil {
+		return []any{}, nil
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, fmt.Errorf("%w: reverse: expected list, got %T", ErrEvaluate, v)
+	}
+	n := rv.Len()
+	out := make([]any, n)
+	for i := 0; i < n; i++ {
+		out[i] = rv.Index(n - 1 - i).Interface()
+	}
+	return out, nil
 }

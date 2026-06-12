@@ -9,20 +9,39 @@ import (
 	"go/printer"
 	"go/token"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 // itEnv is a scope chain used by the higher-order special forms. It
-// binds `it` (current element) and `index` (0-based position) while
-// delegating every other identifier to the parent env. Scopes nest
-// naturally: an itEnv whose parent is itself an itEnv resolves inner
-// `it`/`index` to the innermost loop, matching lexical expectations
-// for `map(users, map(it.friends, it.name))`.
+// binds the current element and `index` (0-based position) while
+// delegating every other identifier to the parent env. The two-arg
+// form of an iterating form binds the element as `it`; the three-arg
+// form binds it under the user-chosen name instead, recorded here in
+// name. Scopes nest naturally: an itEnv whose parent is itself an
+// itEnv resolves inner bindings to the innermost loop, matching
+// lexical expectations for `map(users, map(it.friends, it.name))`.
+// Because a named scope does not bind `it` at all, a nested two-arg
+// form's `it` stays reachable from inside a named form and vice
+// versa: `map(reviews, r, map(r.comments, sprintf("%s: %s", r.author, it)))`.
 type itEnv struct {
 	parent any
 	it     any
 	index  int64
+	// name is the element binding's identifier for the three-arg
+	// form. Empty means the two-arg form, which binds `it`.
+	name string
+}
+
+// elementName returns the identifier under which this scope binds the
+// current element: `it` for the two-arg form, the user-chosen name
+// for the three-arg form.
+func (s *itEnv) elementName() string {
+	if s.name != "" {
+		return s.name
+	}
+	return "it"
 }
 
 // higherOrderForm is the uniform signature for every built-in
@@ -46,8 +65,9 @@ type userForm struct {
 	// callHint is the signature shown in the "is a special form"
 	// suggester message, e.g. `map(xs, predicate)`.
 	callHint string
-	// bindsIt marks the iterating forms, which bind `it`/`index`
-	// inside their second argument. Drives the identifier collector.
+	// bindsIt marks the iterating forms, which bind an element and
+	// `index` inside their body: `it` in the two-arg form, a named
+	// binding in the three-arg form. Drives the identifier collector.
 	bindsIt bool
 	fn      higherOrderForm
 }
@@ -79,10 +99,12 @@ func init() {
 	userForms = []userForm{
 		{name: "map", internal: mapFormName, callHint: "map(xs, predicate)", bindsIt: true, fn: formMap},
 		{name: "filter", internal: "filter", callHint: "filter(xs, predicate)", bindsIt: true, fn: formFilter},
+		{name: "flatMap", internal: "flatMap", callHint: "flatMap(xs, predicate)", bindsIt: true, fn: formFlatMap},
 		{name: "any", internal: "any", callHint: "any(xs, predicate)", bindsIt: true, fn: formAny},
 		{name: "all", internal: "all", callHint: "all(xs, predicate)", bindsIt: true, fn: formAll},
 		{name: "find", internal: "find", callHint: "find(xs, predicate)", bindsIt: true, fn: formFind},
 		{name: "count", internal: "count", callHint: "count(xs, predicate)", bindsIt: true, fn: formCount},
+		{name: "sortBy", internal: "sortBy", callHint: "sortBy(xs, key)", bindsIt: true, fn: formSortBy},
 		{name: "try", internal: "try", callHint: "try(value, default)", fn: formTry},
 		{name: "if", internal: ifFuncName, callHint: "if(cond, then, else)", fn: formIf},
 	}
@@ -142,13 +164,41 @@ func (p *Program) iterItems(ctx context.Context, name string, collExpr ast.Expr,
 		ErrEvaluate, name, coll)
 }
 
-// checkFormArity reports a consistent error across every form.
-func checkFormArity(name string, got int) error {
-	if got == 2 {
-		return nil
+// splitFormArgs splits an iterating form's arguments into the
+// collection expression, the element binding name, and the body
+// expression. The two-arg form binds the element as `it` (bind is
+// ""); the three-arg form names the binding explicitly: argument 2
+// must be a plain identifier, and the body then sees the element
+// under that name instead of `it`, so nested forms can still
+// reference an outer `it`. The arity and binding checks happen at
+// eval time, like every other form check, because forms can be
+// shadowed by env entries that only exist at Run.
+func splitFormArgs(name string, n *ast.CallExpr) (coll ast.Expr, bind string, body ast.Expr, err error) {
+	switch len(n.Args) {
+	case 2:
+		return n.Args[0], "", n.Args[1], nil
+	case 3:
+		ident, ok := n.Args[1].(*ast.Ident)
+		if !ok {
+			if src := exprDisplayString(n.Args[1]); src != "" {
+				return nil, "", nil, fmt.Errorf("%w: %s binding must be a plain identifier, got `%s`",
+					ErrEvaluate, name, src)
+			}
+			return nil, "", nil, fmt.Errorf("%w: %s binding must be a plain identifier",
+				ErrEvaluate, name)
+		}
+		bind = displayIdent(ident.Name)
+		switch {
+		case bind == "it", bind == "index",
+			bind == "true", bind == "false", bind == "nil",
+			bind != ident.Name: // keyword sentinel: user wrote `map` or `if`
+			return nil, "", nil, fmt.Errorf("%w: %s binding cannot be named %q",
+				ErrEvaluate, name, bind)
+		}
+		return n.Args[0], bind, n.Args[2], nil
 	}
-	return fmt.Errorf("%w: %s expects 2 arguments (collection, predicate), got %d",
-		ErrEvaluate, name, got)
+	return nil, "", nil, fmt.Errorf("%w: %s expects 2 arguments (collection, predicate) or 3 (collection, name, predicate), got %d",
+		ErrEvaluate, name, len(n.Args))
 }
 
 // forEach is the shared loop used by every higher-order form. The
@@ -165,12 +215,13 @@ func (p *Program) forEach(
 	ctx context.Context,
 	name string,
 	items itemSeq,
+	bind string,
 	predicate ast.Expr,
 	env any,
 	depth int,
 	body func(item any, result any) (stop bool, err error),
 ) error {
-	scope := &itEnv{parent: env}
+	scope := &itEnv{parent: env, name: bind}
 	for i := 0; i < items.n; i++ {
 		item := items.at(i)
 		scope.it = item
@@ -367,15 +418,16 @@ func displayJSONLit(n *ast.CompositeLit) (ast.Expr, bool) {
 }
 
 func formMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
-	if err := checkFormArity("map", len(n.Args)); err != nil {
+	coll, bind, body, err := splitFormArgs("map", n)
+	if err != nil {
 		return nil, err
 	}
-	items, err := p.iterItems(ctx, "map", n.Args[0], env, depth)
+	items, err := p.iterItems(ctx, "map", coll, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]any, 0, items.n)
-	err = p.forEach(ctx, "map", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "map", items, bind, body, env, depth, func(_ any, v any) (bool, error) {
 		out = append(out, v)
 		return false, nil
 	})
@@ -386,15 +438,16 @@ func formMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 }
 
 func formFilter(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
-	if err := checkFormArity("filter", len(n.Args)); err != nil {
+	coll, bind, body, err := splitFormArgs("filter", n)
+	if err != nil {
 		return nil, err
 	}
-	items, err := p.iterItems(ctx, "filter", n.Args[0], env, depth)
+	items, err := p.iterItems(ctx, "filter", coll, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]any, 0, items.n)
-	err = p.forEach(ctx, "filter", items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
+	err = p.forEach(ctx, "filter", items, bind, body, env, depth, func(item any, v any) (bool, error) {
 		if isTruthy(v) {
 			out = append(out, item)
 		}
@@ -406,16 +459,105 @@ func formFilter(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth
 	return out, nil
 }
 
-func formAny(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
-	if err := checkFormArity("any", len(n.Args)); err != nil {
+// formFlatMap implements `flatMap(xs, body)` / `flatMap(xs, x, body)`.
+// Like map, except a body result that is a list is spliced into the
+// output element-by-element, and a nil body result is spliced as
+// nothing (mirroring iterItems, which treats nil as an empty list).
+// Any other body result is appended as a single element, so flatMap
+// over mixed data never errors on a non-list value.
+func formFlatMap(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	coll, bind, body, err := splitFormArgs("flatMap", n)
+	if err != nil {
 		return nil, err
 	}
-	items, err := p.iterItems(ctx, "any", n.Args[0], env, depth)
+	items, err := p.iterItems(ctx, "flatMap", coll, env, depth)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, items.n)
+	err = p.forEach(ctx, "flatMap", items, bind, body, env, depth, func(_ any, v any) (bool, error) {
+		switch s := v.(type) {
+		case nil:
+			return false, nil
+		case []any:
+			out = append(out, s...)
+			return false, nil
+		}
+		rv := reflect.ValueOf(v)
+		if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+			for i := 0; i < rv.Len(); i++ {
+				out = append(out, rv.Index(i).Interface())
+			}
+			return false, nil
+		}
+		out = append(out, v)
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// formSortBy implements `sortBy(xs, key)` / `sortBy(xs, x, key)`. The
+// key expression is evaluated once per element; elements are then
+// reordered by their keys with a stable sort, so equal keys preserve
+// input order. Keys follow the same comparison rules as sort: all
+// numbers (any int/float mix) or all strings, anything else is an
+// ErrEvaluate naming the offending element.
+func formSortBy(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	coll, bind, body, err := splitFormArgs("sortBy", n)
+	if err != nil {
+		return nil, err
+	}
+	items, err := p.iterItems(ctx, "sortBy", coll, env, depth)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]any, 0, items.n)
+	elems := make([]any, 0, items.n)
+	err = p.forEach(ctx, "sortBy", items, bind, body, env, depth, func(item any, v any) (bool, error) {
+		keys = append(keys, v)
+		elems = append(elems, item)
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	less, err := scalarLessFunc("sortBy", keys)
+	if err != nil {
+		return nil, err
+	}
+	sort.Stable(&keyedSorter{keys: keys, elems: elems, less: less})
+	return elems, nil
+}
+
+// keyedSorter reorders elems and keys in tandem so sortBy can sort
+// elements by their computed keys.
+type keyedSorter struct {
+	keys  []any
+	elems []any
+	less  func(i, j int) bool
+}
+
+func (s *keyedSorter) Len() int { return len(s.keys) }
+func (s *keyedSorter) Swap(i, j int) {
+	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]
+	s.elems[i], s.elems[j] = s.elems[j], s.elems[i]
+}
+func (s *keyedSorter) Less(i, j int) bool { return s.less(i, j) }
+
+func formAny(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
+	coll, bind, body, err := splitFormArgs("any", n)
+	if err != nil {
+		return nil, err
+	}
+	items, err := p.iterItems(ctx, "any", coll, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	found := false
-	err = p.forEach(ctx, "any", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "any", items, bind, body, env, depth, func(_ any, v any) (bool, error) {
 		if isTruthy(v) {
 			found = true
 			return true, nil
@@ -429,15 +571,16 @@ func formAny(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 }
 
 func formAll(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
-	if err := checkFormArity("all", len(n.Args)); err != nil {
+	coll, bind, body, err := splitFormArgs("all", n)
+	if err != nil {
 		return nil, err
 	}
-	items, err := p.iterItems(ctx, "all", n.Args[0], env, depth)
+	items, err := p.iterItems(ctx, "all", coll, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	ok := true
-	err = p.forEach(ctx, "all", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "all", items, bind, body, env, depth, func(_ any, v any) (bool, error) {
 		if !isTruthy(v) {
 			ok = false
 			return true, nil
@@ -451,16 +594,17 @@ func formAll(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth in
 }
 
 func formFind(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
-	if err := checkFormArity("find", len(n.Args)); err != nil {
+	coll, bind, body, err := splitFormArgs("find", n)
+	if err != nil {
 		return nil, err
 	}
-	items, err := p.iterItems(ctx, "find", n.Args[0], env, depth)
+	items, err := p.iterItems(ctx, "find", coll, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	var match any
 	matched := false
-	err = p.forEach(ctx, "find", items, n.Args[1], env, depth, func(item any, v any) (bool, error) {
+	err = p.forEach(ctx, "find", items, bind, body, env, depth, func(item any, v any) (bool, error) {
 		if isTruthy(v) {
 			match = item
 			matched = true
@@ -478,15 +622,16 @@ func formFind(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth i
 }
 
 func formCount(p *Program, ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
-	if err := checkFormArity("count", len(n.Args)); err != nil {
+	coll, bind, body, err := splitFormArgs("count", n)
+	if err != nil {
 		return nil, err
 	}
-	items, err := p.iterItems(ctx, "count", n.Args[0], env, depth)
+	items, err := p.iterItems(ctx, "count", coll, env, depth)
 	if err != nil {
 		return nil, err
 	}
 	var total int64
-	err = p.forEach(ctx, "count", items, n.Args[1], env, depth, func(_ any, v any) (bool, error) {
+	err = p.forEach(ctx, "count", items, bind, body, env, depth, func(_ any, v any) (bool, error) {
 		if isTruthy(v) {
 			total++
 		}
