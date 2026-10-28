@@ -182,7 +182,9 @@ If expressions are written ahead of time, describe the env's shape as a
 an expression is saved. The same choices carry over: a map whose keys
 you control is a closed `ObjectOf`; a JSON payload you only partly know
 is an `OpenObject`; a key you normalize to an explicit `nil` is a type
-with `.OrNil()`, which the checker makes every read handle.
+with `.OrNil()`, which the checker makes every read handle; and a key
+you may leave out goes in the object's `Absent` set, so reads of it
+need `?.`.
 
 ## When to preprocess in Go vs in the expression
 

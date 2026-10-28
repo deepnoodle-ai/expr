@@ -371,6 +371,7 @@ func TestCheckMatchesRun(t *testing.T) {
 		`[[b], [bx]][0][0].x`:       `field "x" may be absent; use ?.`,
 		`{"o": if(c, bx, b)}.o.x`:   `field "x" may be absent; use ?.`,
 		`draft.title`:               `field "title" may be absent; use ?.`,
+		`if(c, {"x": 1}, {}).x`:     `field "x" may be absent; use ?.`,
 	} {
 		p := compile(src)
 		_, err := p.Check(env, coalesceType)
@@ -426,6 +427,7 @@ func TestCheckMatchesRun(t *testing.T) {
 		`[b, {"y": "t"}][0].y`:       "string",
 		`[b, scores][0]?.y`:          "(number | string)?",
 		`draft?.title || "untitled"`: "string",
+		`if(c, {"x": 1}, {})?.x`:     "1?",
 	} {
 		p := compile(src)
 		got, err := p.Check(env, coalesceType)

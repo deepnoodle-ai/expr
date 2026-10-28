@@ -762,12 +762,14 @@ func TestGuide_TypeChecking(t *testing.T) {
 		`issue.kind == "bug" && issue.score > 0.5`:                      "bool",
 		`map(filter(issue.labels, startsWith(it, "area/")), upper(it))`: "list<string>",
 		`{"title": issue.title, "kind": issue.kind}`:                    `{kind: "bug" | "feature" | "question", title: string}`,
-		`review?.verdict`:                              `("approve" | "reject")?`,
-		`try(review.body, "no review")`:                "string",
-		`review != nil && review.verdict == "approve"`: "bool",
-		`event.action`:                                 "any",
-		`issue.title || "untitled"`:                    "string",
-		`issue.title || 0`:                             "0 | string",
+		`review?.verdict`:                                         `("approve" | "reject")?`,
+		`try(review.body, "no review")`:                           "string",
+		`review != nil && review.verdict == "approve"`:            "bool",
+		`event.action`:                                            "any",
+		`issue.title || "untitled"`:                               "string",
+		`issue.title || 0`:                                        "0 | string",
+		`if(review != nil, review, {"verdict": "approve"})`:       `{body?: string, verdict: "approve" | "reject"}`,
+		`if(review != nil, review, {"verdict": "approve"})?.body`: "string?",
 	} {
 		got, err := check(src)
 		if err != nil {
@@ -785,6 +787,7 @@ func TestGuide_TypeChecking(t *testing.T) {
 		`split(issue.title, 1)`:     "split: argument 2 must be string, not number",
 		`issue.labels[issue.title]`: "list index must be a number, not string",
 		`len(issue.title || 0)`:     "len: argument 1 may be number, and must be string or a list or an object",
+		`if(review != nil, review, {"verdict": "approve"}).body`: "`if(review != nil, review, {\"verdict\": \"approve\"}).body`: field \"body\" may be absent; use ?.",
 	} {
 		_, err := check(src)
 		if !errors.Is(err, ErrType) || !strings.Contains(err.Error(), want) {

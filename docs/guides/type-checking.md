@@ -62,8 +62,11 @@ hurt.
 
 If your data is described by JSON Schema, convert the schema to a
 `Type`: `object` with `properties` becomes `ObjectOf` (or `OpenObject`
-when `additionalProperties` is not false), `enum` becomes `EnumOf`, and
-a property not in `required` becomes `.OrNil()`.
+when `additionalProperties` is not false), and `enum` becomes `EnumOf`.
+A property not in `required` becomes `.OrNil()` if your host sets every
+missing property to nil before `Run`. If the host leaves the key out
+instead, add the property to the object's `Absent` set
+(`Absent: map[string]bool{"note": true}`), so reading it needs `?.`.
 
 ## Running it
 
@@ -154,9 +157,29 @@ expression, so `review.verdict` is narrowed by `review != nil` but not
 by `r != nil` where `r` happens to hold the same value.
 
 A key may be absent from an object: an unlisted field of an open object
-whose `Elem` is typed, or `scores[name]` where `name` is any string.
-Reading a missing key fails, so `Check` asks for `?.` or `?[`, which
-give nil instead.
+whose `Elem` is typed, a field only some of the joined objects have (see
+below), a field in the object's `Absent` set, or `scores[name]` where
+`name` is any string. Reading a missing key fails, so `Check` asks for
+`?.` or `?[`, which give nil instead.
+
+Objects are joined wherever a value may be one of several: `if(...)`,
+`||`, a list literal, and a function typed with `Join`. A field that
+every side has is present in the join. A field that only one side has
+may be absent, and the type shows it as `name?: type`:
+
+```text
+if(review != nil, review, {"verdict": "approve"})
+    ok: {body?: string, verdict: "approve" | "reject"}
+if(review != nil, review, {"verdict": "approve"}).body
+    `if(review != nil, review, {"verdict": "approve"}).body`: field "body" may be absent; use ?.
+if(review != nil, review, {"verdict": "approve"})?.body
+    ok: string?
+```
+
+Absent and nil are different. A field `body?: string` may lack its key,
+so reading it needs `?.`. A field `note: string?`, typed `.OrNil()`,
+always has its key and its value may be nil: `.` reads it safely, and
+only what you do with the value needs a nil check.
 
 ## `&&`, `||` and unions
 
@@ -190,7 +213,8 @@ t, err := p.Check(env, expr.WithFuncType("concat", func(args []*expr.Type) (*exp
 
 The function receives the argument types and returns the result type,
 or an error to report a misuse. `Join(a, b)` is the type of a value that
-is either `a` or `b`.
+is either `a` or `b`. For two objects, a field only one of them has may
+be absent in the join.
 
 Names resolve the way `Run` resolves them: env first, then registered
 functions, then the higher-order forms. Registering `count` replaces the

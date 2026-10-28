@@ -733,7 +733,10 @@ the result type. `Template.Check` does the same for every `${...}`.
 
 A `Type` has a kind (any, nil, bool, number, string, list, object), an
 element type for lists, fields for objects (closed unless `Open`), an
-`Optional` flag (the value may be nil), and an optional `Enum`. Literals
+`Absent` set of fields whose key may be missing (a field not in it is
+always present), an `Optional` flag (the value may be nil), and an
+optional `Enum`. A field in `Absent` renders as `name?: type`; a field
+whose value may be nil renders as `name: type?`. Literals
 type as single-value enums, so `{"verdict": "APPROVE"}` types as
 `{verdict: "APPROVE"}`.
 
@@ -751,7 +754,8 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
   `join([1, 2], ",")`, `sort("abc")`), or nil where it does not accept
   nil (`upper(nil)`, `has(m, nil)`);
 - object key that may be absent: an unlisted field of an open object
-  with a typed `Elem`, or an index by a string that is not a literal
+  with a typed `Elem`, a field in `Absent` (which Join sets for a field
+  only one side has), or an index by a string that is not a literal
   (`scores[name]`), unless read with `?.`/`?[` or inside `try`;
 - object literal key that is not a string or may be nil;
 - `==`/`!=` that can never be true: different kinds, or a literal outside
@@ -766,7 +770,11 @@ builtin accepts a union only when it accepts every member, and `==` reports
 one that shares no kind with the other side. A
 nil check narrows: in `x != nil && x.a > 3`, `x == nil || x.a > 3` and
 `if(x != nil, x.a, 0)`, `x` is known not to be nil where it is read. A field
-an open object does not list may be absent, so it is read with `?.`.
+an open object does not list may be absent, so it is read with `?.`. Joining
+two objects (through `if`, `||`, a list literal or a function typed with
+`Join`) keeps the fields both have, as present; a field only one has is
+in `Absent`, so `if(c, {"x": 1}, {}).x` is reported and
+`if(c, {"x": 1}, {})?.x` types as `1?`.
 `==` and `!=` on lists or objects are reported, since Run rejects them.
 
 `Any` disables checking for the value and everything derived from it, so a
