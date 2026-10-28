@@ -475,8 +475,10 @@ true (including against an enum). A nil `*Type` means `Any`.
 a registered function: `fn(args []*expr.Type) (*expr.Type, error)` returns
 the result type or an error to report. Without it, registered functions
 return `Any`. Names resolve as in Run: env, then registered functions, then
-the forms. An open object's unlisted fields are `Any` unless `Elem` is set;
-reading a key that may be absent needs `?.`/`?[`. Guide:
+the forms. An open object's unlisted fields are `Any` unless `Elem` is set.
+A field only one side of a join has (`if(c, a, b)`, `a || b`, `[a, b]`) may
+be absent and prints as `name?: type`, unlike `name: type?` (present, may be
+nil). Reading a key that may be absent needs `?.`/`?[`. Guide:
 `docs/guides/type-checking.md`.
 
 Field names may be Go keywords: `event.type`, `x?.range`.

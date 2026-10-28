@@ -436,16 +436,14 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 	switch {
 	case ok:
 		f = orAny(f) // a nil field type is unknown, like a nil env entry
+		if recv.Absent[name] {
+			f = c.mayBeAbsent(n, name, f, optional)
+		}
 	case recv.Open:
-		// An unlisted field may be absent, and selecting a missing key
-		// fails at run time; only ?. reads it safely, as nil.
+		// An unlisted field may be absent too, unless it is untyped.
 		f = orAny(recv.Elem)
-		switch {
-		case f.isAny():
-		case optional:
-			f = f.OrNil()
-		case c.lenient == 0:
-			c.report(n, "field %q may be absent; use ?.", name)
+		if !f.isAny() {
+			f = c.mayBeAbsent(n, name, f, optional)
 		}
 	default:
 		names := make([]string, 0, len(recv.Fields))
@@ -458,6 +456,22 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 	}
 	if optional && recv.Optional {
 		return f.OrNil()
+	}
+	return f
+}
+
+// mayBeAbsent types a read of a field whose key may be missing. Selecting
+// a missing key fails at run time; only ?. and ?[ read it safely, as nil.
+func (c *checker) mayBeAbsent(n ast.Expr, name string, f *Type, optional bool) *Type {
+	switch {
+	case optional:
+		return f.OrNil()
+	case c.lenient == 0:
+		use := "?."
+		if _, ok := n.(*ast.IndexExpr); ok {
+			use = "?["
+		}
+		c.report(n, "field %q may be absent; use %s", name, use)
 	}
 	return f
 }

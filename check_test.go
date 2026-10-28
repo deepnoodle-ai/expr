@@ -122,7 +122,16 @@ func TestCheckTemplate(t *testing.T) {
 func TestJoin(t *testing.T) {
 	a := ObjectOf(map[string]*Type{"verdict": String(), "body": String()})
 	b := ObjectOf(map[string]*Type{"verdict": EnumOf("APPROVE"), "extra": Number()})
-	require.Equal(t, "{body: string?, extra: number?, verdict: string}", Join(a, b).String())
+	// A field only one side has may be absent; one both sides have is
+	// present, and stays nil-able only if a side says so.
+	require.Equal(t, "{body?: string, extra?: number, verdict: string}", Join(a, b).String())
+	c := ObjectOf(map[string]*Type{"verdict": String().OrNil(), "body": String()})
+	require.Equal(t, "{body: string, verdict: string?}", Join(a, c).String())
+	require.Equal(t, "{body?: string, extra?: number, verdict: string?}", Join(Join(a, b), c).String())
+	// Against an open side, the field may also hold that side's Elem.
+	open := &Type{Kind: KindObject, Open: true, Elem: Number()}
+	require.Equal(t, "{body?: number | string, verdict?: number | string, ...}", Join(a, open).String())
+	require.Equal(t, "{body?: any, verdict?: any, ...}", Join(a, OpenObject(nil)).String())
 	require.Equal(t, "string?", Join(String(), Null()).String())
 	require.Equal(t, "number | string", Join(String(), Number()).String())
 }
@@ -261,8 +270,19 @@ func TestCheckMatchesRun(t *testing.T) {
 		"x":      ListOf(item),
 		"xss":    ListOf(ListOf(item)),
 		"map":    Number(),
+		// Objects for joins: bx has every field of b, and y with
+		// another type; nb is nil at run time and c is false, so the
+		// joins below yield b, which lacks x.
+		"b":  ObjectOf(map[string]*Type{"y": String()}),
+		"bx": ObjectOf(map[string]*Type{"x": String(), "y": Number()}),
+		"nb": ObjectOf(map[string]*Type{"x": String(), "y": Number()}).OrNil(),
+		"c":  Bool(),
+		// A host may mark a field absent itself: draft's title is
+		// missing at run time.
+		"draft": &Type{Kind: KindObject, Fields: map[string]*Type{"title": String()}, Absent: map[string]bool{"title": true}},
 	}
 	values := map[string]any{
+		"b": map[string]any{"y": "s"}, "bx": map[string]any{"x": "v", "y": 1}, "nb": nil, "c": false, "draft": map[string]any{},
 		"s": nil, "w": "x", "xs": []any{1, 2}, "ys": nil,
 		"a":   map[string]any{"t": []any{"q"}, "n": nil},
 		"obj": map[string]any{"k": "v"}, "scores": map[string]any{"alice": 1}, "k": "bob",
@@ -270,10 +290,20 @@ func TestCheckMatchesRun(t *testing.T) {
 	}
 	compile := func(src string) *Program {
 		p, err := Compile(src, WithBuiltins(), WithFunctions(StringFuncs()), WithFunctions(MathFuncs()),
-			WithFunctions(CollectionFuncs()), WithFunctions(map[string]any{"count": func(xs []any) int { return len(xs) }}))
+			WithFunctions(CollectionFuncs()), WithFunctions(map[string]any{
+				"count":    func(xs []any) int { return len(xs) },
+				"coalesce": coalesce,
+			}))
 		require.NoError(t, err, src)
 		return p
 	}
+	coalesceType := WithFuncType("coalesce", func(args []*Type) (*Type, error) {
+		var t *Type
+		for _, a := range args {
+			t = Join(t, a.NonNil())
+		}
+		return orAny(t), nil
+	})
 	for src, want := range map[string]string{
 		// B1 is in kwfield_test.go. B2: a union is not Any.
 		`upper(s || 0)`:           "may be number, and must be string",
@@ -328,9 +358,23 @@ func TestCheckMatchesRun(t *testing.T) {
 		`contains("abc", 1)`:      "contains: looking in string needs a string",
 		`contains(obj, 1)`:        "contains: looking in an object needs a string",
 		`first(x) != nil && any(xss, x, first(x).a > 1)`: "`first(x)`: may be nil",
+		// A2.1: a field only one side of a join has may be absent.
+		`[b, {"x": "q"}][0].x`:      `field "x" may be absent; use ?.`,
+		`[b, bx][0].x`:              `field "x" may be absent; use ?.`,
+		`[b, bx][0]["x"]`:           `field "x" may be absent; use ?[`,
+		`if(c, bx, b).x`:            `field "x" may be absent; use ?.`,
+		`(nb || b).x`:               `field "x" may be absent; use ?.`,
+		`coalesce(nb, b).x`:         `field "x" may be absent; use ?.`,
+		`upper(if(c, bx, b).x)`:     `field "x" may be absent; use ?.`,
+		`[b, scores][0].alice`:      `field "alice" may be absent; use ?.`,
+		`any([b, bx], it.x == "v")`: `field "x" may be absent; use ?.`,
+		`[[b], [bx]][0][0].x`:       `field "x" may be absent; use ?.`,
+		`{"o": if(c, bx, b)}.o.x`:   `field "x" may be absent; use ?.`,
+		`draft.title`:               `field "title" may be absent; use ?.`,
+		`if(c, {"x": 1}, {}).x`:     `field "x" may be absent; use ?.`,
 	} {
 		p := compile(src)
-		_, err := p.Check(env)
+		_, err := p.Check(env, coalesceType)
 		require.Error(t, err, src)
 		require.Contains(t, err.Error(), want, src)
 		_, err = p.Run(context.Background(), values)
@@ -369,9 +413,24 @@ func TestCheckMatchesRun(t *testing.T) {
 		`try(scores[k], 0)`:          "number",
 		`{(w || "k"): 1}`:            "{...}",
 		`string(s) + upper(w || "")`: "string",
+		// A2.1: ?. and ?[ read a field that may be absent as nil.
+		`[b, {"x": "q"}][0]?.x`:       `"q"?`,
+		`[b, bx][0]?["x"]`:            "string?",
+		`if(c, bx, b)?.x`:             "string?",
+		`(nb || b)?.x`:                "string?",
+		`coalesce(nb, b)?.x`:          "string?",
+		`try(if(c, bx, b).x, "none")`: "string",
+		`any([b, bx], it?.x == "v")`:  "bool",
+		// Fields both sides have are present, whatever their types.
+		`if(c, bx, b).y`:             "number | string",
+		`coalesce(nb, b).y`:          "number | string",
+		`[b, {"y": "t"}][0].y`:       "string",
+		`[b, scores][0]?.y`:          "(number | string)?",
+		`draft?.title || "untitled"`: "string",
+		`if(c, {"x": 1}, {})?.x`:     "1?",
 	} {
 		p := compile(src)
-		got, err := p.Check(env)
+		got, err := p.Check(env, coalesceType)
 		require.NoError(t, err, src)
 		require.Equal(t, want, got.String(), src)
 		_, err = p.Run(context.Background(), values)
@@ -388,7 +447,7 @@ func TestCheckMatchesRun(t *testing.T) {
 
 	// M2: a nil field type is Any when joined.
 	require.Equal(t, "{k: any}", Join(ObjectOf(map[string]*Type{"k": nil}), ObjectOf(map[string]*Type{"k": String()})).String())
-	require.Equal(t, "{k: any}", Join(ObjectOf(map[string]*Type{"k": nil}), ObjectOf(map[string]*Type{})).String())
+	require.Equal(t, "{k?: any}", Join(ObjectOf(map[string]*Type{"k": nil}), ObjectOf(map[string]*Type{})).String())
 }
 
 func TestCheckHints(t *testing.T) {
@@ -412,4 +471,15 @@ func TestCheckIndexReportsOnce(t *testing.T) {
 	require.Len(t, te.Problems, 1, strings.Join(te.Problems, "\n"))
 	_, err = checkSrc(t, `try(findings.items[nil], 0)`)
 	require.NoError(t, err)
+}
+
+// coalesce returns its first non-nil argument, like the host function
+// workflows register.
+func coalesce(args ...any) any {
+	for _, a := range args {
+		if a != nil {
+			return a
+		}
+	}
+	return nil
 }
