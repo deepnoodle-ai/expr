@@ -186,6 +186,27 @@ feature is gone. The second argument is an *evaluated value*, not an
 AST re-evaluated per element. If you want per-element evaluation,
 don't shadow the form — register a different name.
 
+## Types for `Check`
+
+[`Program.Check`](type-checking.md) knows the signatures of the builtins
+and the opt-in groups. A function you register returns `Any` to the
+checker, which turns checking off for everything derived from the call.
+Declare its type with `WithFuncType`, passed to `Check`:
+
+```go
+t, err := p.Check(env, expr.WithFuncType("concat", func(args []*expr.Type) (*expr.Type, error) {
+    if len(args) != 2 {
+        return nil, fmt.Errorf("concat expects 2 arguments, got %d", len(args))
+    }
+    return expr.Join(args[0], args[1]), nil
+}))
+```
+
+The function gets the argument types and returns the result type, or an
+error that `Check` reports at the call. Replacing a builtin with your own
+function of the same name drops the builtin's signature, since `Check`
+can no longer know what the call does.
+
 ## Errors from registered functions
 
 A `(T, error)` return becomes an `ErrEvaluate`-wrapped error out of

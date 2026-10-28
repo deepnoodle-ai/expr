@@ -175,6 +175,15 @@ Each top-level key is an identifier, and expressions select into
 whichever shape fits. This composes well because you can add a new
 root without touching existing expressions.
 
+## Describing the env's types
+
+If expressions are written ahead of time, describe the env's shape as a
+`map[string]*expr.Type` and run [`Program.Check`](type-checking.md) when
+an expression is saved. The same choices carry over: a map whose keys
+you control is a closed `ObjectOf`; a JSON payload you only partly know
+is an `OpenObject`; a key you normalize to an explicit `nil` is a type
+with `.OrNil()`, which the checker makes every read handle.
+
 ## When to preprocess in Go vs in the expression
 
 If the same derivation shows up in every expression — `totalCents / 100`,

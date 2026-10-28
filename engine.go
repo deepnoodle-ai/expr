@@ -31,6 +31,16 @@
 //
 //	t, err := expr.NewTemplate("Hello ${user.name}!", expr.WithBuiltins())
 //	out, err := t.Render(ctx, env)
+//
+// # Type checking
+//
+// [Program.Check] checks an expression against the [Type] of each env
+// name without running it, and reports every problem as a [*TypeError]:
+// unknown names and fields, wrong-kind operations and builtin arguments,
+// reads of values that may be nil, and comparisons that are never true.
+//
+//	env := map[string]*expr.Type{"user": expr.ObjectOf(map[string]*expr.Type{"name": expr.String()})}
+//	t, err := p.Check(env)
 package expr
 
 import (

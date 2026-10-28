@@ -174,6 +174,10 @@ template: invalid expression `${x +}` at 2:3 (offset 11): ...
 template: unclosed `${` at 3:1 (offset 18, missing `}`)
 ```
 
+To catch mistakes in the expressions before anything renders,
+`Template.Check(env)` type-checks every `${...}` against the env's types
+(see [Type checking](type-checking.md)).
+
 ## Inspecting segments: `Template.Segments()`
 
 `Segments()` returns the parsed segments in source order as
