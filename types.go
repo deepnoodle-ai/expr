@@ -34,8 +34,15 @@ type Type struct {
 	// Elem is the element type of a list. For an open object it is the
 	// type of fields not listed in Fields (nil means Any).
 	Elem *Type
-	// Fields are an object's known fields.
+	// Fields are an object's known fields. Each is present in every value
+	// of the type unless Absent marks it; a field's Optional means its
+	// value may be nil, not that its key may be missing.
 	Fields map[string]*Type
+	// Absent marks fields in Fields whose key may be missing from the
+	// object, as Join produces for a field only one side has. Reading one
+	// needs ?. or ?[, which give nil; plain . fails at run time when the
+	// key is missing.
+	Absent map[string]bool
 	// Open allows fields beyond Fields. Selecting an unlisted field of a
 	// closed object is an error.
 	Open bool
@@ -105,6 +112,7 @@ func (t *Type) isAny() bool { return t == nil || (t.Kind == KindAny && len(t.Var
 func (t *Type) IsUnion() bool { return t != nil && t.Kind == KindAny && len(t.Variants) > 0 }
 
 // String renders the type, for example `{kind: "bug_fix" | "feature", items: list<string>}?`.
+// A field that may be absent renders as `name?: type`.
 func (t *Type) String() string {
 	if t == nil {
 		return "any"
@@ -142,7 +150,11 @@ func (t *Type) String() string {
 		sort.Strings(names)
 		parts := make([]string, 0, len(names)+1)
 		for _, k := range names {
-			parts = append(parts, k+": "+t.Fields[k].String())
+			sep := ": "
+			if t.Absent[k] {
+				sep = "?: "
+			}
+			parts = append(parts, k+sep+t.Fields[k].String())
 		}
 		if t.Open {
 			parts = append(parts, "...")
@@ -266,20 +278,7 @@ func Join(a, b *Type) *Type {
 		out.Elem = Join(orAny(a.Elem), orAny(b.Elem))
 	case KindObject:
 		out.Open = a.Open || b.Open
-		out.Fields = map[string]*Type{}
-		for k, at := range a.Fields {
-			// A nil field type is Any, not "no type yet".
-			if bt, ok := b.Fields[k]; ok {
-				out.Fields[k] = Join(orAny(at), orAny(bt))
-			} else {
-				out.Fields[k] = orAny(at).OrNil()
-			}
-		}
-		for k, bt := range b.Fields {
-			if _, ok := a.Fields[k]; !ok {
-				out.Fields[k] = orAny(bt).OrNil()
-			}
-		}
+		joinFields(out, a, b)
 		switch {
 		case a.Open && b.Open:
 			out.Elem = Join(orAny(a.Elem), orAny(b.Elem))
@@ -298,4 +297,43 @@ func Join(a, b *Type) *Type {
 		}
 	}
 	return out
+}
+
+// joinFields sets the fields of out, the join of objects a and b. A field
+// only one side lists may be absent, since the value may be the other
+// side, which lacks it; if that side is open, the field may also hold
+// that side's Elem.
+func joinFields(out, a, b *Type) {
+	out.Fields = map[string]*Type{}
+	set := func(k string, t *Type, absent bool) {
+		out.Fields[k] = t
+		if absent {
+			if out.Absent == nil {
+				out.Absent = map[string]bool{}
+			}
+			out.Absent[k] = true
+		}
+	}
+	for k, at := range a.Fields {
+		// A nil field type is Any, not "no type yet".
+		if bt, ok := b.Fields[k]; ok {
+			set(k, Join(orAny(at), orAny(bt)), a.Absent[k] || b.Absent[k])
+		} else {
+			set(k, unlistedJoin(at, b), true)
+		}
+	}
+	for k, bt := range b.Fields {
+		if _, ok := a.Fields[k]; !ok {
+			set(k, unlistedJoin(bt, a), true)
+		}
+	}
+}
+
+// unlistedJoin is the type of a field listed with type t on one side of
+// a join and not listed by other.
+func unlistedJoin(t, other *Type) *Type {
+	if other.Open {
+		return Join(orAny(t), orAny(other.Elem))
+	}
+	return orAny(t)
 }
