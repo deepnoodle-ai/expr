@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/scanner"
 	"go/token"
 	"reflect"
 	"sort"
@@ -227,7 +228,9 @@ func (c *checker) checkNode(node ast.Expr, sc *scope) *Type {
 			return Bool()
 		}
 		c.nilCheck(n.X, x)
-		c.oneKind(n.X, x)
+		if !c.oneKind(n.X, x) {
+			return Number()
+		}
 		if !x.isAny() && x.Kind != KindNumber {
 			c.report(n, "%s is not a number", x)
 		}
@@ -253,23 +256,26 @@ func (c *checker) ident(n *ast.Ident, sc *scope) *Type {
 	case "nil":
 		return Null()
 	}
-	if t, ok := sc.lookup(n.Name); ok {
+	name := displayIdent(n.Name)
+	if t, ok := sc.lookup(name); ok {
 		return t
 	}
-	if t, ok := c.env[n.Name]; ok {
-		if t == nil {
-			return Any
-		}
-		return t
+	if t, ok := c.env[name]; ok {
+		return orAny(t)
 	}
-	if _, ok := c.p.funcs[displayIdent(n.Name)]; ok {
+	if _, ok := c.p.funcs[name]; ok {
 		return Any
 	}
 	names := make([]string, 0, len(c.env))
 	for k := range c.env {
 		names = append(names, k)
 	}
-	c.report(n, "undefined name %q%s", displayIdent(n.Name), formatHint(n.Name, names))
+	for s := sc; s != nil; s = s.parent {
+		for k := range s.names {
+			names = append(names, k)
+		}
+	}
+	c.report(n, "undefined name %q%s", name, formatHint(name, names))
 	return Any
 }
 
@@ -362,17 +368,30 @@ func (c *checker) binary(n *ast.BinaryExpr, sc *scope) *Type {
 	}
 }
 
-// comparable reports == and != comparisons that can never be true.
+// comparable reports == and != comparisons that fail at run time (a list
+// or object compared with anything but nil) or can never be true.
 func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 	if l.isAny() || r.isAny() || l.Kind == KindNull || r.Kind == KindNull {
 		return
 	}
-	if l.Kind == KindList || l.Kind == KindObject || r.Kind == KindList || r.Kind == KindObject {
-		c.report(n, "cannot compare %s and %s with %s", l.NonNil(), r.NonNil(), n.Op)
+	lk, rk := variants(l), variants(r)
+	for _, t := range append(lk, rk...) {
+		if t.Kind == KindList || t.Kind == KindObject {
+			c.report(n, "cannot compare %s and %s with %s", l.NonNil(), r.NonNil(), n.Op)
+			return
+		}
+	}
+	shared := false
+	for _, a := range lk {
+		for _, b := range rk {
+			shared = shared || a.Kind == b.Kind
+		}
+	}
+	if !shared {
+		c.report(n, "comparing %s with %s is never true", l.NonNil(), r.NonNil())
 		return
 	}
-	if l.Kind != r.Kind {
-		c.report(n, "comparing %s with %s is never true", l.NonNil(), r.NonNil())
+	if l.IsUnion() || r.IsUnion() {
 		return
 	}
 	for _, pair := range [][2]*Type{{l, r}, {r, l}} {
@@ -382,6 +401,14 @@ func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 			return
 		}
 	}
+}
+
+// variants returns the types a union may have, or t alone.
+func variants(t *Type) []*Type {
+	if t.IsUnion() {
+		return t.Variants
+	}
+	return []*Type{t}
 }
 
 // field types recv.name. optional is set for `?.`.
@@ -411,16 +438,14 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 		f = orAny(f) // a nil field type is unknown, like a nil env entry
 	case recv.Open:
 		// An unlisted field may be absent, and selecting a missing key
-		// fails at run time; only ?. reads it safely.
-		f = recv.Elem
-		if f == nil {
-			f = Any
-		}
-		if f.Kind != KindAny {
-			if !optional && c.lenient == 0 {
-				c.report(n, "field %q may be absent; use ?.", name)
-			}
+		// fails at run time; only ?. reads it safely, as nil.
+		f = orAny(recv.Elem)
+		switch {
+		case f.isAny():
+		case optional:
 			f = f.OrNil()
+		case c.lenient == 0:
+			c.report(n, "field %q may be absent; use ?.", name)
 		}
 	default:
 		names := make([]string, 0, len(recv.Fields))
@@ -454,23 +479,59 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 	if !optional {
 		c.nilCheck(recvNode, recv)
 	}
+	// A nil index fails even after ?[.
+	if idx.Kind == KindNull {
+		if c.lenient == 0 {
+			c.report(idxNode, "the index is always nil")
+		}
+		return Any
+	}
+	c.nilCheck(idxNode, idx)
+	if !c.oneKind(idxNode, idx) {
+		return Any
+	}
 	var out *Type
 	switch recv.Kind {
-	case KindList:
-		if !idx.isAny() && idx.Kind != KindNumber {
-			c.report(n, "list index must be a number, not %s", idx)
-		}
+	case KindList, KindString:
+		what := "list"
 		out = recv.Elem
-	case KindString:
-		out = String()
-	case KindObject:
-		if idx.Kind == KindString && len(idx.Enum) == 1 {
-			name, _ := idx.Enum[0].(string)
-			return c.field(n, recvNode, recv, name, optional)
+		if recv.Kind == KindString {
+			what, out = "string", String()
 		}
-		out = Any
-		if recv.Open && recv.Elem != nil {
-			out = recv.Elem
+		if !idx.isAny() && idx.Kind != KindNumber {
+			c.report(n, "%s index must be a number, not %s", what, describe(idx))
+		}
+	case KindObject:
+		if !idx.isAny() && idx.Kind != KindString {
+			c.report(n, "object key must be a string, not %s", describe(idx))
+			return Any
+		}
+		if len(idx.Enum) > 0 {
+			// Each key the index may be. A nil receiver is reported above.
+			r := recv
+			if !optional {
+				r = recv.NonNil()
+			}
+			var t *Type
+			for _, v := range idx.Enum {
+				name, _ := v.(string)
+				t = Join(t, c.field(n, recvNode, r, name, optional))
+			}
+			return t
+		}
+		if idx.isAny() || (recv.Open && recv.Elem == nil) {
+			return Any
+		}
+		// Any string: the key may be absent, which fails unless read
+		// with ?[, as nil.
+		if !optional && c.lenient == 0 {
+			c.report(n, "the key may be absent; use ?[")
+		}
+		for _, f := range recv.Fields {
+			out = Join(out, orAny(f))
+		}
+		if recv.Open {
+			out = Join(out, recv.Elem)
 		}
 	default:
 		c.report(n, "cannot index %s", recv)
@@ -492,9 +553,7 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 	ident, _ := n.Fun.(*ast.Ident)
 	if ident == nil {
 		c.check(n.Fun, sc)
-		for _, a := range n.Args {
-			c.check(a, sc)
-		}
+		c.args(n, sc)
 		return Any
 	}
 	name := ident.Name
@@ -513,8 +572,34 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 	case name == tryIndexFormName && len(n.Args) == 2:
 		recv := c.check(n.Args[0], sc)
 		return c.index(n, n.Args[0], recv, n.Args[1], c.check(n.Args[1], sc), true).OrNil()
+	}
+
+	// Resolve the name as Run does: the environment, then registered
+	// functions, then the special forms.
+	display := displayIdent(name)
+	_, bound := sc.lookup(display)
+	if _, inEnv := c.env[display]; bound || inEnv {
+		c.args(n, sc)
+		return Any
+	}
+	if registered, ok := c.p.funcs[display]; ok {
+		args := c.args(n, sc)
+		if fn := c.cfg.funcTypes[display]; fn != nil {
+			t, err := fn(args)
+			if err != nil {
+				c.report(n, "%v", err)
+				return Any
+			}
+			return t
+		}
+		if sig, ok := builtinSigs[display]; ok && isBuiltin(display, registered) {
+			return c.builtin(n, display, sig, args)
+		}
+		return Any
+	}
+	switch {
 	case iteratingForms[name]:
-		return c.iterating(n, displayIdent(name), sc)
+		return c.iterating(n, display, sc)
 	case name == "try":
 		if len(n.Args) != 2 {
 			c.report(n, "try expects 2 arguments (value, default), got %d", len(n.Args))
@@ -533,42 +618,26 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 		then := c.narrow(narrowings(n.Args[0], true), n.Args[1], sc)
 		return Join(then, c.narrow(narrowings(n.Args[0], false), n.Args[2], sc))
 	}
+	c.args(n, sc)
+	names := make([]string, 0, len(c.p.funcs)+len(specialForms))
+	for k := range c.p.funcs {
+		names = append(names, k)
+	}
+	names = append(names, specialForms...)
+	c.report(n, "undefined function %q%s", display, formatHint(display, names))
+	return Any
+}
 
+// specialForms are the user-visible names of the forms call handles
+// itself.
+var specialForms = []string{"map", "filter", "flatMap", "any", "all", "find", "count", "sortBy", "try", "if"}
+
+func (c *checker) args(n *ast.CallExpr, sc *scope) []*Type {
 	args := make([]*Type, len(n.Args))
 	for i, a := range n.Args {
 		args[i] = c.check(a, sc)
 	}
-	display := displayIdent(name)
-	fn := c.cfg.funcTypes[display]
-	if fn == nil {
-		if registered, ok := c.p.funcs[display]; ok && isBuiltin(display, registered) {
-			fn = builtinTypes[display]
-		}
-	}
-	if fn == nil {
-		if _, registered := c.p.funcs[display]; registered {
-			return Any
-		}
-		if _, inEnv := c.env[display]; inEnv {
-			return Any
-		}
-		if _, bound := sc.lookup(display); bound {
-			return Any
-		}
-		c.report(n, "undefined function %q", display)
-		return Any
-	}
-	if nilIntolerant[display] && fn != nil && c.cfg.funcTypes[display] == nil {
-		for i, a := range args {
-			c.nilCheck(n.Args[i], a)
-		}
-	}
-	t, err := fn(args)
-	if err != nil {
-		c.report(n, "%v", err)
-		return Any
-	}
-	return t
+	return args
 }
 
 // builtinFuncs maps each builtin name to its function's code pointer, so
@@ -591,14 +660,6 @@ func isBuiltin(name string, fn any) bool {
 	}
 	rv := reflect.ValueOf(fn)
 	return rv.Kind() == reflect.Func && rv.Pointer() == ptr
-}
-
-// nilIntolerant are the builtins that fail on a nil argument. The rest
-// (len, string, int, first, keys, sum, ...) treat nil as empty.
-var nilIntolerant = map[string]bool{
-	"abs": true, "ceil": true, "floor": true, "round": true, "min": true, "max": true,
-	"upper": true, "lower": true, "trim": true, "replace": true, "split": true,
-	"startsWith": true, "endsWith": true, "slice": true,
 }
 
 func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
@@ -627,14 +688,20 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 	// not reach into the body.
 	hidden := map[string]int{}
 	for k, v := range c.narrowed {
-		for _, name := range []string{bind, "index"} {
-			if k == name || strings.HasPrefix(k, name+".") || strings.HasPrefix(k, name+"?") || strings.HasPrefix(k, name+"[") {
-				hidden[k] = v
-				delete(c.narrowed, k)
-			}
+		if mentions(k, bind) || mentions(k, "index") {
+			hidden[k] = v
+			delete(c.narrowed, k)
 		}
 	}
 	bt := c.check(body, inner)
+	if form == "sortBy" {
+		// Keys must all be numbers or all strings, and not nil.
+		if bt.IsUnion() {
+			c.report(body, "sortBy: keys may be %s; they must all be one kind", bt)
+		} else {
+			c.argument(body, "sortBy", 2, param{kinds: numberOrString}, bt)
+		}
+	}
 	for k, v := range hidden {
 		c.narrowed[k] = v
 	}
@@ -656,6 +723,26 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 		return Number()
 	}
 	return Any
+}
+
+// mentions reports whether the source text src refers to the name as an
+// identifier, not as a field (`x.name`) or inside a string.
+func mentions(src, name string) bool {
+	fs := token.NewFileSet()
+	file := fs.AddFile("", fs.Base(), len(src))
+	var s scanner.Scanner
+	s.Init(file, []byte(src), nil, 0)
+	prev := token.ILLEGAL
+	for {
+		_, tok, lit := s.Scan()
+		if tok == token.EOF {
+			return false
+		}
+		if tok == token.IDENT && lit == name && prev != token.PERIOD {
+			return true
+		}
+		prev = tok
+	}
 }
 
 func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
@@ -680,8 +767,17 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			vt := c.check(kv.Value, sc)
 			if key, ok := literalString(kt); ok {
 				out.Fields[key] = vt
-			} else {
-				out.Open = true
+				continue
+			}
+			out.Open = true
+			switch {
+			case kt.Kind == KindNull:
+				c.report(kv.Key, "an object key is always nil")
+			case !c.oneKind(kv.Key, kt):
+			case !kt.isAny() && kt.Kind != KindString:
+				c.report(kv.Key, "an object key must be a string, not %s", describe(kt))
+			default:
+				c.nilCheck(kv.Key, kt)
 			}
 		}
 		return out
@@ -697,78 +793,225 @@ func literalString(t *Type) (string, bool) {
 	return s, ok
 }
 
-// builtinTypes types the functions in Builtins, StringFuncs, MathFuncs and
+// kinds is a set of kinds, for the arguments a builtin accepts. The zero
+// set accepts any kind.
+type kinds uint8
+
+func kindSet(ks ...Kind) kinds {
+	var s kinds
+	for _, k := range ks {
+		s |= 1 << k
+	}
+	return s
+}
+
+func (s kinds) has(k Kind) bool { return s == 0 || s&(1<<k) != 0 }
+
+func (s kinds) String() string {
+	var names []string
+	for k := KindNull; k <= KindObject; k++ {
+		if s&(1<<k) != 0 {
+			names = append(names, kindNames[k])
+		}
+	}
+	return strings.Join(names, " or ")
+}
+
+var kindNames = map[Kind]string{
+	KindNull: "nil", KindBool: "bool", KindNumber: "number", KindString: "string",
+	KindList: "a list", KindObject: "an object",
+}
+
+// describe renders t for a message about its kind, without literal values
+// or nil.
+func describe(t *Type) string { return plain(t.NonNil()).String() }
+
+var (
+	stringKind     = kindSet(KindString)
+	numberKind     = kindSet(KindNumber)
+	listKind       = kindSet(KindList)
+	objectKind     = kindSet(KindObject)
+	listOrString   = kindSet(KindList, KindString)
+	numberOrString = kindSet(KindNumber, KindString)
+	sizedKinds     = kindSet(KindList, KindString, KindObject)
+)
+
+// param is one argument of a builtin.
+type param struct {
+	kinds kinds
+	// nilOK is set when the builtin treats nil as empty or zero.
+	nilOK bool
+	// elems, if set, are the kinds a listKind argument's elements must all
+	// have. They must be one kind and not nil.
+	elems kinds
+}
+
+// sig is a builtin's signature, which Check enforces as the builtin does
+// at run time.
+type sig struct {
+	params []param
+	// variadic repeats the last param zero or more times.
+	variadic bool
+	// check, if set, reports rules that span arguments.
+	check  func(args []*Type) error
+	result func(args []*Type) *Type
+}
+
+func fixed(t *Type) func([]*Type) *Type { return func([]*Type) *Type { return t } }
+
+// builtinSigs types the functions in Builtins, StringFuncs, MathFuncs and
 // CollectionFuncs.
-var builtinTypes = map[string]FuncType{
-	"len": func(a []*Type) (*Type, error) {
-		if err := wantArgs("len", a, 1); err != nil {
-			return nil, err
-		}
-		if t := a[0]; !t.isAny() && t.Kind != KindNull && t.Kind != KindList && t.Kind != KindString && t.Kind != KindObject {
-			return nil, fmt.Errorf("len of %s", t)
-		}
-		return Number(), nil
-	},
-	"string": returns(String()), "sprintf": returns(String()), "join": returns(String()),
-	"int": returns(Number()), "float": returns(Number()), "abs": returns(Number()),
-	"ceil": returns(Number()), "floor": returns(Number()), "round": returns(Number()),
-	"sum": returns(Number()), "min": returns(Number()), "max": returns(Number()),
-	"bool": returns(Bool()), "has": returns(Bool()), "contains": returns(Bool()),
-	"upper": stringFunc("upper", String()), "lower": stringFunc("lower", String()),
-	"trim": stringFunc("trim", String()), "replace": stringFunc("replace", String()),
-	"startsWith": stringFunc("startsWith", Bool()), "endsWith": stringFunc("endsWith", Bool()),
-	"split": stringFunc("split", ListOf(String())),
-	"keys":  returns(ListOf(String())),
-	"first": elemFunc, "last": elemFunc,
-	"slice": sameFunc, "sort": sameFunc, "reverse": sameFunc,
-	"entries": func(a []*Type) (*Type, error) {
-		value := Any
-		if len(a) == 1 && a[0].Kind == KindObject {
-			var v *Type
-			for _, f := range a[0].Fields {
-				v = Join(v, f)
-			}
-			if a[0].Open {
-				v = Any
-			}
-			if v != nil {
-				value = v
-			}
-		}
-		return ListOf(ObjectOf(map[string]*Type{"key": String(), "value": value})), nil
-	},
+var builtinSigs = map[string]sig{
+	"len":      {params: []param{{kinds: sizedKinds, nilOK: true}}, result: fixed(Number())},
+	"string":   {params: []param{{nilOK: true}}, result: fixed(String())},
+	"int":      {params: []param{{kinds: numberOrString, nilOK: true}}, result: fixed(Number())},
+	"float":    {params: []param{{kinds: numberOrString, nilOK: true}}, result: fixed(Number())},
+	"bool":     {params: []param{{nilOK: true}}, result: fixed(Bool())},
+	"contains": {params: []param{{kinds: sizedKinds, nilOK: true}, {nilOK: true}}, check: containsNeedle, result: fixed(Bool())},
+	"has":      {params: []param{{kinds: objectKind, nilOK: true}, {kinds: stringKind}}, result: fixed(Bool())},
+	"keys":     {params: []param{{kinds: objectKind, nilOK: true}}, result: fixed(ListOf(String()))},
+	"entries":  {params: []param{{kinds: objectKind, nilOK: true}}, result: entriesType},
+	"lower":    {params: []param{{kinds: stringKind}}, result: fixed(String())},
+	"upper":    {params: []param{{kinds: stringKind}}, result: fixed(String())},
+	"sprintf":  {params: []param{{kinds: stringKind}, {nilOK: true}}, variadic: true, result: fixed(String())},
+
+	"min":   {params: []param{{kinds: numberKind}, {kinds: numberKind}}, variadic: true, result: fixed(Number())},
+	"max":   {params: []param{{kinds: numberKind}, {kinds: numberKind}}, variadic: true, result: fixed(Number())},
+	"abs":   {params: []param{{kinds: numberKind}}, result: fixed(Number())},
+	"floor": {params: []param{{kinds: numberKind}}, result: fixed(Number())},
+	"ceil":  {params: []param{{kinds: numberKind}}, result: fixed(Number())},
+	"round": {params: []param{{kinds: numberKind}}, result: fixed(Number())},
+
+	"trim":       {params: []param{{kinds: stringKind}}, result: fixed(String())},
+	"split":      {params: []param{{kinds: stringKind}, {kinds: stringKind}}, result: fixed(ListOf(String()))},
+	"join":       {params: []param{{kinds: listKind, nilOK: true, elems: stringKind}, {kinds: stringKind}}, result: fixed(String())},
+	"replace":    {params: []param{{kinds: stringKind}, {kinds: stringKind}, {kinds: stringKind}}, result: fixed(String())},
+	"startsWith": {params: []param{{kinds: stringKind}, {kinds: stringKind}}, result: fixed(Bool())},
+	"endsWith":   {params: []param{{kinds: stringKind}, {kinds: stringKind}}, result: fixed(Bool())},
+
+	"first":   {params: []param{{kinds: listKind, nilOK: true}}, result: elemOrNil},
+	"last":    {params: []param{{kinds: listKind, nilOK: true}}, result: elemOrNil},
+	"sum":     {params: []param{{kinds: listKind, nilOK: true, elems: numberKind}}, result: fixed(Number())},
+	"slice":   {params: []param{{kinds: listOrString, nilOK: true}, {kinds: numberKind}, {kinds: numberKind}}, result: sliceType},
+	"sort":    {params: []param{{kinds: listKind, nilOK: true, elems: numberOrString}}, result: listType},
+	"reverse": {params: []param{{kinds: listKind, nilOK: true}}, result: listType},
 }
 
-func returns(t *Type) FuncType {
-	return func([]*Type) (*Type, error) { return t, nil }
+// builtin checks a call to a builtin against its signature.
+func (c *checker) builtin(n *ast.CallExpr, name string, s sig, args []*Type) *Type {
+	switch {
+	case s.variadic && len(args) < len(s.params)-1:
+		c.report(n, "%s expects at least %d argument(s), got %d", name, len(s.params)-1, len(args))
+		return s.result(nil)
+	case !s.variadic && len(args) != len(s.params):
+		c.report(n, "%s expects %d argument(s), got %d", name, len(s.params), len(args))
+		return s.result(nil)
+	}
+	for i, a := range args {
+		p := s.params[min(i, len(s.params)-1)]
+		c.argument(n.Args[i], name, i+1, p, a)
+	}
+	if s.check != nil {
+		if err := s.check(args); err != nil {
+			c.report(n, "%s: %v", name, err)
+		}
+	}
+	return s.result(args)
 }
 
-func stringFunc(name string, result *Type) FuncType {
-	return func(a []*Type) (*Type, error) {
-		if len(a) > 0 && !a[0].isAny() && a[0].Kind != KindString {
-			return nil, fmt.Errorf("%s expects a string, got %s", name, a[0])
+func (c *checker) argument(node ast.Expr, name string, pos int, p param, t *Type) {
+	if t.isAny() {
+		return
+	}
+	if t.Kind == KindNull {
+		if !p.nilOK && c.lenient == 0 {
+			c.report(node, "%s: argument %d is always nil", name, pos)
 		}
-		return result, nil
+		return
+	}
+	if !p.nilOK {
+		c.nilCheck(node, t)
+	}
+	for _, v := range variants(t) {
+		if !p.kinds.has(v.Kind) {
+			if t.IsUnion() {
+				c.report(node, "%s: argument %d may be %s, and must be %s", name, pos, describe(v), p.kinds)
+			} else {
+				c.report(node, "%s: argument %d must be %s, not %s", name, pos, p.kinds, describe(t))
+			}
+			return
+		}
+	}
+	if p.elems == 0 || t.Kind != KindList || t.Elem.isAny() {
+		return
+	}
+	switch e := t.Elem; {
+	case e.Kind == KindNull || e.Optional:
+		c.report(node, "%s: argument %d has elements that may be nil", name, pos)
+	case e.IsUnion():
+		c.report(node, "%s: argument %d has elements that may be %s, and must all be one of %s", name, pos, e, p.elems)
+	case !p.elems.has(e.Kind):
+		c.report(node, "%s: argument %d must have %s elements, not %s", name, pos, p.elems, describe(e))
 	}
 }
 
-func elemFunc(a []*Type) (*Type, error) {
-	if len(a) == 1 && a[0] != nil && a[0].Kind == KindList && a[0].Elem != nil {
-		return a[0].Elem.OrNil(), nil
+// containsNeedle checks contains: a string haystack and an object (by key)
+// need a string needle.
+func containsNeedle(a []*Type) error {
+	if len(a) != 2 || a[1].isAny() {
+		return nil
 	}
-	return Any, nil
-}
-
-func sameFunc(a []*Type) (*Type, error) {
-	if len(a) > 0 && a[0] != nil && (a[0].Kind == KindList || a[0].Kind == KindString) {
-		return plain(a[0].NonNil()), nil
-	}
-	return Any, nil
-}
-
-func wantArgs(name string, a []*Type, n int) error {
-	if len(a) != n {
-		return fmt.Errorf("%s expects %d argument(s), got %d", name, n, len(a))
+	for _, h := range variants(a[0]) {
+		if h.Kind != KindString && h.Kind != KindObject {
+			continue
+		}
+		if a[1].Kind != KindString || a[1].Optional {
+			return fmt.Errorf("looking in %s needs a string, not %s", kindNames[h.Kind], a[1].String())
+		}
 	}
 	return nil
+}
+
+func entriesType(a []*Type) *Type {
+	value := Any
+	if len(a) == 1 && a[0].Kind == KindObject && !(a[0].Open && a[0].Elem == nil) {
+		var v *Type
+		for _, f := range a[0].Fields {
+			v = Join(v, orAny(f))
+		}
+		if a[0].Open {
+			v = Join(v, a[0].Elem)
+		}
+		value = orAny(v)
+	}
+	return ListOf(ObjectOf(map[string]*Type{"key": String(), "value": value}))
+}
+
+func elemOrNil(a []*Type) *Type {
+	if len(a) == 1 && a[0].Kind == KindList {
+		return orAny(a[0].Elem).OrNil()
+	}
+	return Any
+}
+
+// listType is the result of sort and reverse: a new list, empty for nil.
+func listType(a []*Type) *Type {
+	if len(a) == 1 && a[0].Kind == KindList {
+		return ListOf(orAny(a[0].Elem))
+	}
+	return ListOf(Any)
+}
+
+// sliceType is a list for a list or nil, and a string for a string.
+func sliceType(a []*Type) *Type {
+	if len(a) == 0 || a[0].isAny() {
+		return Any
+	}
+	if a[0].Kind == KindString {
+		if a[0].Optional {
+			return Join(String(), ListOf(Any))
+		}
+		return String()
+	}
+	return listType(a[:1])
 }

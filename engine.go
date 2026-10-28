@@ -207,12 +207,13 @@ func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 	if len(cfg.errs) > 0 {
 		return nil, fmt.Errorf("%w: %w", ErrCompile, errors.Join(cfg.errs...))
 	}
-	// Pipeline order: optaccess turns `?.`/`?[` into sentinel calls
-	// while the source still uses raw operator syntax; jsonlit then
-	// rewrites bare composite literals; preprocessSource handles the
-	// keyword rewrites (`map`) so the parser accepts them as
-	// identifiers.
-	parsed := preprocessSource(rewriteKeywordFields(jsonlit.Rewrite(optaccess.Rewrite(code))))
+	// Pipeline order: rewriteKeywordFields renames keyword field names
+	// (`x.type`) first, so the later rewrites see an identifier there;
+	// optaccess turns `?.`/`?[` into sentinel calls while the source
+	// still uses raw operator syntax; jsonlit then rewrites bare
+	// composite literals; preprocessSource handles the keyword rewrites
+	// (`map`) so the parser accepts them as identifiers.
+	parsed := preprocessSource(jsonlit.Rewrite(optaccess.Rewrite(rewriteKeywordFields(code))))
 	fset := token.NewFileSet()
 	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
@@ -353,7 +354,8 @@ func preprocessSource(src string) string {
 const keywordFieldPrefix = "__expr_kw_"
 
 // rewriteKeywordFields renames every Go keyword that directly follows a
-// `.` (`event.type`, `item.range`, `x.map`) so the expression parses.
+// `.` (`event.type`, `item.range`, `x.map`) so the expression parses. It
+// leaves `?.type` alone: optaccess puts that name in a string literal.
 func rewriteKeywordFields(src string) string {
 	if !strings.Contains(src, ".") {
 		return src
@@ -364,19 +366,22 @@ func rewriteKeywordFields(src string) string {
 	s.Init(file, []byte(src), nil, 0)
 	var out strings.Builder
 	last := 0
-	prev := token.ILLEGAL
+	// period is set when the previous token is a `.` that is not part
+	// of `?.`.
+	period, question := false, false
 	for {
 		pos, tok, lit := s.Scan()
 		if tok == token.EOF {
 			break
 		}
-		if prev == token.PERIOD && tok.IsKeyword() {
+		if period && tok.IsKeyword() {
 			off := file.Offset(pos)
 			out.WriteString(src[last:off])
 			out.WriteString(keywordFieldPrefix + lit)
 			last = off + len(lit)
 		}
-		prev = tok
+		period = tok == token.PERIOD && !question
+		question = tok == token.ILLEGAL && lit == "?"
 	}
 	if last == 0 {
 		return src

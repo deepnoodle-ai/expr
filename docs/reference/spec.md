@@ -740,8 +740,17 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
 - field a closed object does not have (also through `?.`);
 - field read, index or arithmetic on a value that may be nil, except
   through `?.`, `?[` or inside the first argument of `try`;
-- operation on the wrong kind (`len` of a number, adding a number and a
-  string, ordering a bool, iterating a non-list);
+- operation on the wrong kind (adding a number and a string, ordering a
+  bool, iterating a non-list, indexing a list with a string or an object
+  with a number);
+- builtin call with the wrong number of arguments, or an argument of a
+  kind the builtin rejects at run time (`len(5)`, `split(s, 1)`,
+  `join([1, 2], ",")`, `sort("abc")`), or nil where it does not accept
+  nil (`upper(nil)`, `has(m, nil)`);
+- object key that may be absent: an unlisted field of an open object
+  with a typed `Elem`, or an index by a string that is not a literal
+  (`scores[name]`), unless read with `?.`/`?[` or inside `try`;
+- object literal key that is not a string or may be nil;
 - `==`/`!=` that can never be true: different kinds, or a literal outside
   the other side's enum (`kind == "bugfix"` when kind is
   `"bug_fix" | "feature"`).
@@ -756,9 +765,12 @@ an open object does not list may be absent, so it is read with `?.`.
 `==` and `!=` on lists or objects are reported, since Run rejects them.
 
 `Any` disables checking for the value and everything derived from it, so a
-partly typed env checks what it can. Builtins and the optional groups have
-result types; other registered functions return `Any` unless declared with
-`WithFuncType`. Check is static: a passing check does not prove Run
+partly typed env checks what it can. A nil `*Type`, in env or in `Fields`,
+means `Any`. Calls resolve as Run resolves them:
+a name in env, then a registered function, then a special form, so a host
+function named `count` replaces the form. Builtins and the optional groups
+have signatures; other registered functions return `Any` unless declared
+with `WithFuncType`. Check is static: a passing check does not prove Run
 succeeds (a list index can still be out of range).
 
 ## Helpful errors

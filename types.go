@@ -79,7 +79,7 @@ func EnumOf(values ...string) *Type {
 
 // OrNil returns a copy of t that may also be nil.
 func (t *Type) OrNil() *Type {
-	if t == nil || (t.Kind == KindAny && len(t.Variants) == 0) || t.Kind == KindNull {
+	if t.isAny() || t.Kind == KindNull {
 		return t
 	}
 	c := *t
@@ -97,7 +97,9 @@ func (t *Type) NonNil() *Type {
 	return &c
 }
 
-func (t *Type) isAny() bool { return t == nil || t.Kind == KindAny }
+// isAny reports whether t is unknown. A union is not: its variants are
+// known, and each must allow an operation.
+func (t *Type) isAny() bool { return t == nil || (t.Kind == KindAny && len(t.Variants) == 0) }
 
 // IsUnion reports whether t is a union of known types of different kinds.
 func (t *Type) IsUnion() bool { return t != nil && t.Kind == KindAny && len(t.Variants) > 0 }
@@ -249,7 +251,7 @@ func Join(a, b *Type) *Type {
 		return b
 	case b == nil:
 		return a
-	case (a.isAny() && !a.IsUnion()) || (b.isAny() && !b.IsUnion()):
+	case a.isAny() || b.isAny():
 		return Any
 	case a.Kind == KindNull:
 		return b.OrNil()
@@ -266,15 +268,16 @@ func Join(a, b *Type) *Type {
 		out.Open = a.Open || b.Open
 		out.Fields = map[string]*Type{}
 		for k, at := range a.Fields {
+			// A nil field type is Any, not "no type yet".
 			if bt, ok := b.Fields[k]; ok {
-				out.Fields[k] = Join(at, bt)
+				out.Fields[k] = Join(orAny(at), orAny(bt))
 			} else {
-				out.Fields[k] = at.OrNil()
+				out.Fields[k] = orAny(at).OrNil()
 			}
 		}
 		for k, bt := range b.Fields {
 			if _, ok := a.Fields[k]; !ok {
-				out.Fields[k] = bt.OrNil()
+				out.Fields[k] = orAny(bt).OrNil()
 			}
 		}
 		switch {

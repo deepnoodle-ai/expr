@@ -22,6 +22,10 @@ func TestKeywordFieldNames(t *testing.T) {
 		`map(event.range, it * 2)[1] == 4`: true,
 		`"a.type"`:                         "a.type",
 		`{"type": event.type}.type`:        "push",
+		`event.range[1]`:                   2,
+		`event.type[0]`:                    "p",
+		`event.sender.type[0] == "B"`:      true,
+		`event?.range[0]`:                  1,
 	} {
 		p, err := Compile(src, WithBuiltins())
 		require.NoError(t, err, src)
@@ -37,9 +41,10 @@ func TestKeywordFieldNames(t *testing.T) {
 func TestKeywordFieldNamesOptional(t *testing.T) {
 	env := map[string]any{"a": map[string]any{"type": map[string]any{"b": 1}}, "n": nil}
 	for src, want := range map[string]any{
-		`a?.type?.b == 1`: true,
-		`a.type?.b == 1`:  true,
-		`n?.type`:         nil,
+		`a?.type?.b == 1`:                 true,
+		`a.type?.b == 1`:                  true,
+		`n?.type`:                         nil,
+		`a.type?.b == 1 && a.type.b == 1`: true,
 	} {
 		p, err := Compile(src, WithBuiltins())
 		require.NoError(t, err, src)

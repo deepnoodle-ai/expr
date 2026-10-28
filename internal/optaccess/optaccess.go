@@ -198,12 +198,6 @@ func lhsStartIdx(toks []tokenInfo, src string, qIdx int) int {
 	i := qIdx - 1
 	for i >= 0 {
 		t := toks[i]
-		// A keyword used as a field name (`a.type?.b`) walks like an
-		// identifier in a selector chain.
-		if t.kind.IsKeyword() && i-1 >= 0 && toks[i-1].kind == token.PERIOD {
-			i -= 2
-			continue
-		}
 		switch t.kind {
 		case token.IDENT, token.INT, token.FLOAT, token.STRING, token.CHAR,
 			token.MAP, token.IF:
