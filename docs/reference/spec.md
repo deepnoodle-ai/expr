@@ -301,6 +301,9 @@ The field name may be a Go keyword: `event.type`, `item.range`,
 `x.default`, `x?.type`. JSON payloads use these names freely. Keywords
 stay keywords everywhere else.
 
+Identifiers beginning with `__expr_` or `__try_` are reserved for expr's
+internal use. This applies to field names as well.
+
 ## Index expressions (`x[i]`)
 
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
