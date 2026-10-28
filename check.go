@@ -519,7 +519,7 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 			}
 			return t
 		}
-		if idx.isAny() || (recv.Open && recv.Elem == nil) {
+		if idx.isAny() || (recv.Open && recv.Elem.isAny()) {
 			return Any
 		}
 		// Any string: the key may be absent, which fails unless read
@@ -974,7 +974,7 @@ func containsNeedle(a []*Type) error {
 
 func entriesType(a []*Type) *Type {
 	value := Any
-	if len(a) == 1 && a[0].Kind == KindObject && !(a[0].Open && a[0].Elem == nil) {
+	if len(a) == 1 && a[0].Kind == KindObject && !(a[0].Open && a[0].Elem.isAny()) {
 		var v *Type
 		for _, f := range a[0].Fields {
 			v = Join(v, orAny(f))

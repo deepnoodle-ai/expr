@@ -378,6 +378,14 @@ func TestCheckMatchesRun(t *testing.T) {
 		require.NoError(t, err, src)
 	}
 
+	// An open object whose Elem is Any is untyped, like one with no Elem.
+	anyElem := map[string]*Type{"m": &Type{Kind: KindObject, Open: true, Elem: Any}, "k": String()}
+	for src, want := range map[string]string{`m[k]`: "any", `entries(m)[0].value`: "any"} {
+		got, err := compile(src).Check(anyElem)
+		require.NoError(t, err, src)
+		require.Equal(t, want, got.String(), src)
+	}
+
 	// M2: a nil field type is Any when joined.
 	require.Equal(t, "{k: any}", Join(ObjectOf(map[string]*Type{"k": nil}), ObjectOf(map[string]*Type{"k": String()})).String())
 	require.Equal(t, "{k: any}", Join(ObjectOf(map[string]*Type{"k": nil}), ObjectOf(map[string]*Type{})).String())
