@@ -250,9 +250,10 @@ func union(a, b *Type) *Type {
 }
 
 // empty is the element type of an empty list literal. A list with no
-// elements fits any element type, so Join keeps the other side's: the
-// fallback in `xs || []` or `if(c, xs, [])` keeps xs's element type. Alone
-// it is unchecked, like Any.
+// elements fits any element type, so joining it with another list keeps
+// that list's element type: the fallback in `xs || []` or `if(c, xs, [])`
+// keeps xs's. Anywhere else, such as the result of first([]), it is
+// unchecked, like Any.
 var empty = &Type{Kind: KindAny}
 
 func orAny(t *Type) *Type {
@@ -269,10 +270,6 @@ func Join(a, b *Type) *Type {
 		return b
 	case b == nil:
 		return a
-	case a == empty:
-		return b
-	case b == empty:
-		return a
 	case a.isAny() || b.isAny():
 		return Any
 	case a.Kind == KindNull:
@@ -285,7 +282,14 @@ func Join(a, b *Type) *Type {
 	out := &Type{Kind: a.Kind, Optional: a.Optional || b.Optional}
 	switch a.Kind {
 	case KindList:
-		out.Elem = Join(orAny(a.Elem), orAny(b.Elem))
+		switch {
+		case a.Elem == empty:
+			out.Elem = orAny(b.Elem)
+		case b.Elem == empty:
+			out.Elem = orAny(a.Elem)
+		default:
+			out.Elem = Join(orAny(a.Elem), orAny(b.Elem))
+		}
 	case KindObject:
 		out.Open = a.Open || b.Open
 		joinFields(out, a, b)

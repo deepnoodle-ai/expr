@@ -438,6 +438,10 @@ func TestCheckMatchesRun(t *testing.T) {
 		`filter(coalesce(xn, []), it.a > 0)`: "list<{a: number}>",
 		`if(c, [], x)`:                       "list<{a: number}>",
 		`[]`:                                 "list<any>",
+		// The element of an empty list is unknown, not nil-free: first([])
+		// is nil at run time, so this comparison can be true.
+		`if(c, first([]), "s") == 1`:        "bool",
+		`if(c, "s", find([], it > 1)) == 1`: "bool",
 	} {
 		p := compile(src)
 		got, err := p.Check(env, coalesceType)
