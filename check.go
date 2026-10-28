@@ -188,6 +188,15 @@ func (c *checker) report(node ast.Expr, format string, args ...any) {
 	c.problems = append(c.problems, msg)
 }
 
+// oneKind reports a union where an operation needs a single kind.
+func (c *checker) oneKind(node ast.Expr, t *Type) bool {
+	if t.IsUnion() {
+		c.report(node, "may be %s; the operation needs one kind", t)
+		return false
+	}
+	return true
+}
+
 // nilCheck reports a value that may be nil where nil is not allowed.
 func (c *checker) nilCheck(node ast.Expr, t *Type) {
 	if t != nil && t.Optional && c.lenient == 0 {
@@ -217,6 +226,7 @@ func (c *checker) checkNode(node ast.Expr, sc *scope) *Type {
 			return Bool()
 		}
 		c.nilCheck(n.X, x)
+		c.oneKind(n.X, x)
 		if !x.isAny() && x.Kind != KindNumber {
 			c.report(n, "%s is not a number", x)
 		}
@@ -310,6 +320,9 @@ func (c *checker) binary(n *ast.BinaryExpr, sc *scope) *Type {
 	case token.LSS, token.GTR, token.LEQ, token.GEQ:
 		c.nilCheck(n.X, l)
 		c.nilCheck(n.Y, r)
+		if !c.oneKind(n.X, l) || !c.oneKind(n.Y, r) {
+			return Bool()
+		}
 		if !l.isAny() && !r.isAny() && (l.Kind != r.Kind || (l.Kind != KindNumber && l.Kind != KindString)) {
 			c.report(n, "cannot order %s and %s", l, r)
 		}
@@ -317,6 +330,9 @@ func (c *checker) binary(n *ast.BinaryExpr, sc *scope) *Type {
 	case token.ADD:
 		c.nilCheck(n.X, l)
 		c.nilCheck(n.Y, r)
+		if !c.oneKind(n.X, l) || !c.oneKind(n.Y, r) {
+			return Any
+		}
 		switch {
 		case l.isAny() && r.isAny():
 			return Any
@@ -332,6 +348,9 @@ func (c *checker) binary(n *ast.BinaryExpr, sc *scope) *Type {
 	default: // - * / %
 		c.nilCheck(n.X, l)
 		c.nilCheck(n.Y, r)
+		if !c.oneKind(n.X, l) || !c.oneKind(n.Y, r) {
+			return Number()
+		}
 		for _, t := range []*Type{l, r} {
 			if !t.isAny() && t.Kind != KindNumber {
 				c.report(n, "%s is not a number", t)
@@ -367,6 +386,9 @@ func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 // field types recv.name. optional is set for `?.`.
 func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional bool) *Type {
 	switch {
+	case recv.IsUnion():
+		c.oneKind(recvNode, recv)
+		return Any
 	case recv.isAny():
 		return Any
 	case recv.Kind == KindNull:
@@ -414,6 +436,10 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 }
 
 func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx *Type, optional bool) *Type {
+	if recv.IsUnion() {
+		c.oneKind(recvNode, recv)
+		return Any
+	}
 	if recv.isAny() {
 		return Any
 	}

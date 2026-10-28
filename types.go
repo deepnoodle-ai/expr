@@ -43,6 +43,10 @@ type Type struct {
 	Optional bool
 	// Enum, if set, lists every value the type can hold.
 	Enum []any
+	// Variants, on a KindAny type, are the known types of different kinds
+	// the value may have, as Join produces for `x || 0` when x is a
+	// string. Operations that need one kind report a union.
+	Variants []*Type
 }
 
 // Any is the type of values the checker knows nothing about.
@@ -75,7 +79,7 @@ func EnumOf(values ...string) *Type {
 
 // OrNil returns a copy of t that may also be nil.
 func (t *Type) OrNil() *Type {
-	if t == nil || t.Kind == KindAny || t.Kind == KindNull {
+	if t == nil || (t.Kind == KindAny && len(t.Variants) == 0) || t.Kind == KindNull {
 		return t
 	}
 	c := *t
@@ -95,6 +99,9 @@ func (t *Type) NonNil() *Type {
 
 func (t *Type) isAny() bool { return t == nil || t.Kind == KindAny }
 
+// IsUnion reports whether t is a union of known types of different kinds.
+func (t *Type) IsUnion() bool { return t != nil && t.Kind == KindAny && len(t.Variants) > 0 }
+
 // String renders the type, for example `{kind: "bug_fix" | "feature", items: list<string>}?`.
 func (t *Type) String() string {
 	if t == nil {
@@ -103,7 +110,18 @@ func (t *Type) String() string {
 	var s string
 	switch t.Kind {
 	case KindAny:
-		return "any"
+		if len(t.Variants) == 0 {
+			return "any"
+		}
+		parts := make([]string, len(t.Variants))
+		for i, v := range t.Variants {
+			parts[i] = v.String()
+		}
+		s = strings.Join(parts, " | ")
+		if t.Optional {
+			return "(" + s + ")?"
+		}
+		return s
 	case KindNull:
 		return "nil"
 	case KindBool:
@@ -181,6 +199,42 @@ func enumFloat(v any) (float64, bool) {
 	return 0, false
 }
 
+// union joins types of different kinds, merging those of the same kind.
+func union(a, b *Type) *Type {
+	var parts []*Type
+	optional := false
+	for _, t := range []*Type{a, b} {
+		optional = optional || t.Optional
+		if t.IsUnion() {
+			parts = append(parts, t.Variants...)
+		} else {
+			parts = append(parts, t.NonNil())
+		}
+	}
+	var out []*Type
+	for _, p := range parts {
+		merged := false
+		for i, o := range out {
+			if o.Kind == p.Kind {
+				out[i] = Join(o, p)
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			out = append(out, p.NonNil())
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	if len(out) == 1 {
+		if optional {
+			return out[0].OrNil()
+		}
+		return out[0]
+	}
+	return &Type{Kind: KindAny, Variants: out, Optional: optional}
+}
+
 func orAny(t *Type) *Type {
 	if t == nil {
 		return Any
@@ -195,14 +249,14 @@ func Join(a, b *Type) *Type {
 		return b
 	case b == nil:
 		return a
-	case a.isAny() || b.isAny():
+	case (a.isAny() && !a.IsUnion()) || (b.isAny() && !b.IsUnion()):
 		return Any
 	case a.Kind == KindNull:
 		return b.OrNil()
 	case b.Kind == KindNull:
 		return a.OrNil()
-	case a.Kind != b.Kind:
-		return Any
+	case a.IsUnion() || b.IsUnion() || a.Kind != b.Kind:
+		return union(a, b)
 	}
 	out := &Type{Kind: a.Kind, Optional: a.Optional || b.Optional}
 	switch a.Kind {

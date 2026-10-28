@@ -123,7 +123,7 @@ func TestJoin(t *testing.T) {
 	b := ObjectOf(map[string]*Type{"verdict": EnumOf("APPROVE"), "extra": Number()})
 	require.Equal(t, "{body: string?, extra: number?, verdict: string}", Join(a, b).String())
 	require.Equal(t, "string?", Join(String(), Null()).String())
-	require.Equal(t, "any", Join(String(), Number()).String())
+	require.Equal(t, "number | string", Join(String(), Number()).String())
 }
 
 // Regressions from review: each was accepted by Check and failed in Run, or
@@ -147,7 +147,7 @@ func TestCheckMatchesRuntime(t *testing.T) {
 	}
 	for src, want := range map[string]string{
 		`a.flag && a.flag`:                     "bool",
-		`a.items && len(a.items) > 0`:          "any", // a list or a bool: not a boolean
+		`a.items && len(a.items) > 0`:          "(bool | list<string>)?",
 		`a.name || "anon"`:                     "string",
 		`a.n != nil && a.n > 3`:                "bool",
 		`a.n == nil || a.n > 3`:                "bool",
@@ -174,4 +174,28 @@ func TestCheckMatchesRuntime(t *testing.T) {
 		require.Error(t, err, src)
 		require.Contains(t, err.Error(), want, src)
 	}
+}
+
+func TestUnions(t *testing.T) {
+	env := map[string]*Type{"s": String().OrNil(), "n": Number(), "l": ListOf(String()).OrNil()}
+	check := func(src string) (*Type, error) {
+		p, err := Compile(src, WithBuiltins())
+		require.NoError(t, err, src)
+		return p.Check(env)
+	}
+	got, err := check(`s || 0`)
+	require.NoError(t, err)
+	require.Equal(t, "0 | string", got.String())
+	require.True(t, got.IsUnion())
+
+	got, err = check(`l && len(l) > 0`)
+	require.NoError(t, err)
+	require.Equal(t, "(bool | list<string>)?", got.String())
+
+	for _, src := range []string{`(s || 0) + 1`, `(s || 0) > 1`, `(s || 0).x`} {
+		_, err := check(src)
+		require.Error(t, err, src)
+		require.Contains(t, err.Error(), "the operation needs one kind", src)
+	}
+	require.Equal(t, "string", Join(EnumOf("a"), String()).String())
 }

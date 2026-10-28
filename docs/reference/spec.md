@@ -747,7 +747,9 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
   `"bug_fix" | "feature"`).
 
 `&&` and `||` return one of their operands (see Logical), so they type
-as the join of their operand types: `bool` only when both sides are. A
+as the join of their operand types: `bool` only when both sides are. Joining
+types of different kinds gives a union (`string | 0` for `s || 0`), which
+arithmetic, ordering, field reads and indexing reject: they need one kind. A
 nil check narrows: in `x != nil && x.a > 3`, `x == nil || x.a > 3` and
 `if(x != nil, x.a, 0)`, `x` is known not to be nil where it is read. A field
 an open object does not list may be absent, so it is read with `?.`.
