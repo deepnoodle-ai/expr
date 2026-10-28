@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -376,7 +377,7 @@ func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 	}
 	for _, pair := range [][2]*Type{{l, r}, {r, l}} {
 		set, lit := pair[0], pair[1]
-		if len(set.Enum) > 1 && len(lit.Enum) == 1 && !set.hasEnumValue(lit.Enum[0]) {
+		if len(set.Enum) > 0 && len(lit.Enum) == 1 && !set.hasEnumValue(lit.Enum[0]) {
 			c.report(n, "the value is one of %s, never %s", set.NonNil(), formatEnumValue(lit.Enum[0]))
 			return
 		}
@@ -407,6 +408,7 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 	f, ok := recv.Fields[name]
 	switch {
 	case ok:
+		f = orAny(f) // a nil field type is unknown, like a nil env entry
 	case recv.Open:
 		// An unlisted field may be absent, and selecting a missing key
 		// fails at run time; only ?. reads it safely.
@@ -444,6 +446,9 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 		return Any
 	}
 	if recv.Kind == KindNull {
+		if !optional && c.lenient == 0 {
+			c.report(n, "the value is always nil")
+		}
 		return Null()
 	}
 	if !optional {
@@ -471,9 +476,7 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 		c.report(n, "cannot index %s", recv)
 		return Any
 	}
-	if out == nil {
-		out = Any
-	}
+	out = orAny(out)
 	if optional {
 		return out.OrNil()
 	}
@@ -538,7 +541,7 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 	display := displayIdent(name)
 	fn := c.cfg.funcTypes[display]
 	if fn == nil {
-		if _, registered := c.p.funcs[display]; registered {
+		if registered, ok := c.p.funcs[display]; ok && isBuiltin(display, registered) {
 			fn = builtinTypes[display]
 		}
 	}
@@ -555,7 +558,7 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 		c.report(n, "undefined function %q", display)
 		return Any
 	}
-	if nilIntolerant[display] {
+	if nilIntolerant[display] && fn != nil && c.cfg.funcTypes[display] == nil {
 		for i, a := range args {
 			c.nilCheck(n.Args[i], a)
 		}
@@ -566,6 +569,28 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 		return Any
 	}
 	return t
+}
+
+// builtinFuncs maps each builtin name to its function's code pointer, so
+// Check uses a builtin's type only when the registered function is the
+// builtin, not a host function that replaced it.
+var builtinFuncs = func() map[string]uintptr {
+	out := map[string]uintptr{}
+	for _, group := range []map[string]any{Builtins(), StringFuncs(), MathFuncs(), CollectionFuncs()} {
+		for name, fn := range group {
+			out[name] = reflect.ValueOf(fn).Pointer()
+		}
+	}
+	return out
+}()
+
+func isBuiltin(name string, fn any) bool {
+	ptr, ok := builtinFuncs[name]
+	if !ok {
+		return false
+	}
+	rv := reflect.ValueOf(fn)
+	return rv.Kind() == reflect.Func && rv.Pointer() == ptr
 }
 
 // nilIntolerant are the builtins that fail on a nil argument. The rest
@@ -598,7 +623,21 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 		bind = "it"
 	}
 	inner := &scope{names: map[string]*Type{bind: elem, "index": Number()}, parent: sc}
+	// The binding shadows any outer name, so nil checks on that name do
+	// not reach into the body.
+	hidden := map[string]int{}
+	for k, v := range c.narrowed {
+		for _, name := range []string{bind, "index"} {
+			if k == name || strings.HasPrefix(k, name+".") || strings.HasPrefix(k, name+"?") || strings.HasPrefix(k, name+"[") {
+				hidden[k] = v
+				delete(c.narrowed, k)
+			}
+		}
+	}
 	bt := c.check(body, inner)
+	for k, v := range hidden {
+		c.narrowed[k] = v
+	}
 	switch form {
 	case "map":
 		return ListOf(bt)
@@ -714,14 +753,14 @@ func stringFunc(name string, result *Type) FuncType {
 }
 
 func elemFunc(a []*Type) (*Type, error) {
-	if len(a) == 1 && a[0].Kind == KindList && a[0].Elem != nil {
+	if len(a) == 1 && a[0] != nil && a[0].Kind == KindList && a[0].Elem != nil {
 		return a[0].Elem.OrNil(), nil
 	}
 	return Any, nil
 }
 
 func sameFunc(a []*Type) (*Type, error) {
-	if len(a) > 0 && (a[0].Kind == KindList || a[0].Kind == KindString) {
+	if len(a) > 0 && a[0] != nil && (a[0].Kind == KindList || a[0].Kind == KindString) {
 		return plain(a[0].NonNil()), nil
 	}
 	return Any, nil

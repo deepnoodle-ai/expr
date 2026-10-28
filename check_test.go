@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -198,4 +199,48 @@ func TestUnions(t *testing.T) {
 		require.Contains(t, err.Error(), "the operation needs one kind", src)
 	}
 	require.Equal(t, "string", Join(EnumOf("a"), String()).String())
+}
+
+// Regressions from review of #29.
+func TestCheckReviewFixes(t *testing.T) {
+	env := map[string]*Type{
+		"obj": ObjectOf(map[string]*Type{"items": nil, "k": nil}),
+		"x":   ObjectOf(map[string]*Type{"a": Number()}).OrNil(),
+		"xs":  ListOf(ObjectOf(map[string]*Type{"a": Number()}).OrNil()),
+		"e":   EnumOf("a"),
+		"z":   Null(),
+	}
+	check := func(src string, opts ...Option) error {
+		p, err := Compile(src, append([]Option{WithBuiltins(), WithFunctions(CollectionFuncs())}, opts...)...)
+		require.NoError(t, err, src)
+		_, err = p.Check(env)
+		return err
+	}
+	// S1: nil field types are unknown, never a panic.
+	for _, src := range []string{`first(obj.items)`, `reverse(obj.items)`, `obj[obj.k]`, `obj.items.deep`} {
+		require.NoError(t, check(src), src)
+	}
+	// S2: a binding that shadows a narrowed name is not narrowed.
+	err := check(`x != nil && any(xs, x, x.a > 1)`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "may be nil")
+	require.NoError(t, check(`x != nil && any(xs, y, y != nil && y.a > 1 && x.a > 0)`))
+	// S3: a replaced builtin does not keep the builtin's type.
+	require.NoError(t, check(`len(5)`, WithFunctions(map[string]any{"len": func(n float64) float64 { return n }})))
+	require.Error(t, check(`len(5)`))
+	// S4: indexing a value that is always nil.
+	require.Error(t, check(`z[0]`))
+	// S5: single-value enums are compared too.
+	err = check(`e == "b"`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `never "b"`)
+	require.NoError(t, check(`e == "a"`))
+}
+
+func TestKeywordPrefixOnlyRestoresKeywords(t *testing.T) {
+	p, err := Compile(`x.__expr_kw_foo`)
+	require.NoError(t, err)
+	v, err := p.Run(context.Background(), map[string]any{"x": map[string]any{"__expr_kw_foo": 1}})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, v)
 }

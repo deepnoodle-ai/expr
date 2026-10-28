@@ -389,7 +389,10 @@ func rewriteKeywordFields(src string) string {
 func restoreKeywordFields(node ast.Node) {
 	ast.Inspect(node, func(n ast.Node) bool {
 		if sel, ok := n.(*ast.SelectorExpr); ok {
-			sel.Sel.Name = strings.TrimPrefix(sel.Sel.Name, keywordFieldPrefix)
+			// Restore only names the rewrite made: the rest must be a keyword.
+			if name, cut := strings.CutPrefix(sel.Sel.Name, keywordFieldPrefix); cut && token.Lookup(name).IsKeyword() {
+				sel.Sel.Name = name
+			}
 		}
 		return true
 	})
