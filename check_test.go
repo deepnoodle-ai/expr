@@ -268,6 +268,7 @@ func TestCheckMatchesRun(t *testing.T) {
 		"scores": &Type{Kind: KindObject, Open: true, Elem: Number()},
 		"k":      String(),
 		"x":      ListOf(item),
+		"xn":     ListOf(item).OrNil(),
 		"xss":    ListOf(ListOf(item)),
 		"map":    Number(),
 		// Objects for joins: bx has every field of b, and y with
@@ -286,7 +287,7 @@ func TestCheckMatchesRun(t *testing.T) {
 		"s": nil, "w": "x", "xs": []any{1, 2}, "ys": nil,
 		"a":   map[string]any{"t": []any{"q"}, "n": nil},
 		"obj": map[string]any{"k": "v"}, "scores": map[string]any{"alice": 1}, "k": "bob",
-		"x": []any{map[string]any{"a": 1}}, "xss": []any{[]any{}}, "map": 3,
+		"x": []any{map[string]any{"a": 1}}, "xn": []any{map[string]any{"a": 1}}, "xss": []any{[]any{}}, "map": 3,
 	}
 	compile := func(src string) *Program {
 		p, err := Compile(src, WithBuiltins(), WithFunctions(StringFuncs()), WithFunctions(MathFuncs()),
@@ -372,6 +373,10 @@ func TestCheckMatchesRun(t *testing.T) {
 		`{"o": if(c, bx, b)}.o.x`:   `field "x" may be absent; use ?.`,
 		`draft.title`:               `field "title" may be absent; use ?.`,
 		`if(c, {"x": 1}, {}).x`:     `field "x" may be absent; use ?.`,
+		// The items of a list joined with [] are still checked.
+		`any(xn || [], it.nope == 1)`:         `no field "nope"`,
+		`any(coalesce(xn, []), it.nope == 1)`: `no field "nope"`,
+		`any(if(c, [], x), it.nope == 1)`:     `no field "nope"`,
 	} {
 		p := compile(src)
 		_, err := p.Check(env, coalesceType)
@@ -428,6 +433,15 @@ func TestCheckMatchesRun(t *testing.T) {
 		`[b, scores][0]?.y`:          "(number | string)?",
 		`draft?.title || "untitled"`: "string",
 		`if(c, {"x": 1}, {})?.x`:     "1?",
+		// An empty list fallback keeps the other side's element type.
+		`filter(xn || [], it.a > 0)`:         "list<{a: number}>",
+		`filter(coalesce(xn, []), it.a > 0)`: "list<{a: number}>",
+		`if(c, [], x)`:                       "list<{a: number}>",
+		`[]`:                                 "list<any>",
+		// The element of an empty list is unknown, not nil-free: first([])
+		// is nil at run time, so this comparison can be true.
+		`if(c, first([]), "s") == 1`:        "bool",
+		`if(c, "s", find([], it > 1)) == 1`: "bool",
 	} {
 		p := compile(src)
 		got, err := p.Check(env, coalesceType)
