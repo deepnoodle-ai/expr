@@ -452,6 +452,26 @@ if errors.Is(err, expr.ErrCompile) { /* ... */ }
 if errors.Is(err, expr.ErrEvaluate) { /* ... */ }
 ```
 
+## Static type checking
+
+```go
+env := map[string]*expr.Type{
+    "classify": expr.ObjectOf(map[string]*expr.Type{"kind": expr.EnumOf("bug_fix", "feature")}),
+    "report":   expr.ObjectOf(map[string]*expr.Type{"verdict": expr.String()}).OrNil(),
+    "event":    expr.Any,
+}
+t, err := p.Check(env, expr.WithFuncType("concat", concatType))
+// errors.Is(err, expr.ErrType); err.(*expr.TypeError).Problems lists every problem
+```
+
+Types: `expr.Any`, `Null()`, `Bool()`, `Number()`, `String()`, `EnumOf(...)`,
+`ListOf(t)`, `ObjectOf(fields)` (closed), `OpenObject(fields)`, `t.OrNil()`,
+`t.NonNil()`, `Join(a, b)`. Check catches unknown names and fields,
+reads of maybe-nil values without `?.`/`try`, wrong-kind operations, and
+comparisons that are never true (including against an enum).
+
+Field names may be Go keywords: `event.type`, `x?.range`.
+
 ## Cancellation
 
 `Program.Run(ctx, env)` checks `ctx.Err()` before dispatching each AST

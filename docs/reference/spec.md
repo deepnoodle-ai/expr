@@ -297,6 +297,10 @@ rather than choosing one by declaration order.
 Selectors chain left-to-right: `a.b.c` is `(a.b).c`. Selector chains are
 limited by [evaluation depth](#limits-and-safety).
 
+The field name may be a Go keyword: `event.type`, `item.range`,
+`x.default`, `x?.type`. JSON payloads use these names freely. Keywords
+stay keywords everywhere else.
+
 ## Index expressions (`x[i]`)
 
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
@@ -717,6 +721,36 @@ of `?.` / `?[`, operand-returning `||`, and `try(value, default)`
 covers the same use cases. When the LHS is a meaningful falsey value
 that should be kept (`0`, `""`, `[]`), use `try(x, default)`
 explicitly.
+
+## Static type checking
+
+`Program.Check(env map[string]*Type, opts...)` checks an expression
+against the types of its environment without evaluating it, and returns
+the result type. `Template.Check` does the same for every `${...}`.
+
+A `Type` has a kind (any, nil, bool, number, string, list, object), an
+element type for lists, fields for objects (closed unless `Open`), an
+`Optional` flag (the value may be nil), and an optional `Enum`. Literals
+type as single-value enums, so `{"verdict": "APPROVE"}` types as
+`{verdict: "APPROVE"}`.
+
+Check reports, as a `*TypeError` wrapping `ErrType`, every:
+
+- name not in env, scope or the registered functions;
+- field a closed object does not have (also through `?.`);
+- field read, index or arithmetic on a value that may be nil, except
+  through `?.`, `?[` or inside the first argument of `try`;
+- operation on the wrong kind (`len` of a number, adding a number and a
+  string, ordering a bool, iterating a non-list);
+- `==`/`!=` that can never be true: different kinds, or a literal outside
+  the other side's enum (`kind == "bugfix"` when kind is
+  `"bug_fix" | "feature"`).
+
+`Any` disables checking for the value and everything derived from it, so a
+partly typed env checks what it can. Builtins and the optional groups have
+result types; other registered functions return `Any` unless declared with
+`WithFuncType`. Check is static: a passing check does not prove Run
+succeeds (a list index can still be out of range).
 
 ## Helpful errors
 

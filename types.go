@@ -1,0 +1,232 @@
+package expr
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Kind is the shape of a Type.
+type Kind int
+
+const (
+	// KindAny is a value the checker knows nothing about. Every operation
+	// on it is allowed and produces Any.
+	KindAny Kind = iota
+	KindNull
+	KindBool
+	KindNumber
+	KindString
+	KindList
+	KindObject
+)
+
+// Type describes the values an expression may produce, for static checking
+// with [Program.Check]. Build types with the constructors ([String],
+// [ListOf], [ObjectOf], ...) or as literals.
+//
+// Types are structural and deliberately small: they catch misspelled
+// fields, operations on the wrong kind of value, comparisons that can
+// never be true, and reads of values that may be nil.
+type Type struct {
+	Kind Kind
+	// Elem is the element type of a list. For an open object it is the
+	// type of fields not listed in Fields (nil means Any).
+	Elem *Type
+	// Fields are an object's known fields.
+	Fields map[string]*Type
+	// Open allows fields beyond Fields. Selecting an unlisted field of a
+	// closed object is an error.
+	Open bool
+	// Optional means the value may be nil.
+	Optional bool
+	// Enum, if set, lists every value the type can hold.
+	Enum []any
+}
+
+// Any is the type of values the checker knows nothing about.
+var Any = &Type{Kind: KindAny}
+
+func Null() *Type   { return &Type{Kind: KindNull} }
+func Bool() *Type   { return &Type{Kind: KindBool} }
+func Number() *Type { return &Type{Kind: KindNumber} }
+func String() *Type { return &Type{Kind: KindString} }
+
+// ListOf is a list whose elements have type elem.
+func ListOf(elem *Type) *Type { return &Type{Kind: KindList, Elem: elem} }
+
+// ObjectOf is a closed object with exactly the given fields.
+func ObjectOf(fields map[string]*Type) *Type { return &Type{Kind: KindObject, Fields: fields} }
+
+// OpenObject is an object that has the given fields and possibly others.
+func OpenObject(fields map[string]*Type) *Type {
+	return &Type{Kind: KindObject, Fields: fields, Open: true}
+}
+
+// EnumOf is a string type limited to the given values.
+func EnumOf(values ...string) *Type {
+	t := String()
+	for _, v := range values {
+		t.Enum = append(t.Enum, v)
+	}
+	return t
+}
+
+// OrNil returns a copy of t that may also be nil.
+func (t *Type) OrNil() *Type {
+	if t == nil || t.Kind == KindAny || t.Kind == KindNull {
+		return t
+	}
+	c := *t
+	c.Optional = true
+	return &c
+}
+
+// NonNil returns a copy of t that is never nil.
+func (t *Type) NonNil() *Type {
+	if t == nil || !t.Optional {
+		return t
+	}
+	c := *t
+	c.Optional = false
+	return &c
+}
+
+func (t *Type) isAny() bool { return t == nil || t.Kind == KindAny }
+
+// String renders the type, for example `{kind: "bug_fix" | "feature", items: list<string>}?`.
+func (t *Type) String() string {
+	if t == nil {
+		return "any"
+	}
+	var s string
+	switch t.Kind {
+	case KindAny:
+		return "any"
+	case KindNull:
+		return "nil"
+	case KindBool:
+		s = "bool"
+	case KindNumber:
+		s = "number"
+	case KindString:
+		s = "string"
+	case KindList:
+		s = "list<" + t.Elem.String() + ">"
+	case KindObject:
+		names := make([]string, 0, len(t.Fields))
+		for k := range t.Fields {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names)+1)
+		for _, k := range names {
+			parts = append(parts, k+": "+t.Fields[k].String())
+		}
+		if t.Open {
+			parts = append(parts, "...")
+		}
+		s = "{" + strings.Join(parts, ", ") + "}"
+	}
+	if len(t.Enum) > 0 {
+		vals := make([]string, len(t.Enum))
+		for i, v := range t.Enum {
+			vals[i] = formatEnumValue(v)
+		}
+		s = strings.Join(vals, " | ")
+		if t.Optional && len(t.Enum) > 1 {
+			s = "(" + s + ")"
+		}
+	}
+	if t.Optional {
+		s += "?"
+	}
+	return s
+}
+
+func formatEnumValue(v any) string {
+	if s, ok := v.(string); ok {
+		return strconv.Quote(s)
+	}
+	return fmt.Sprint(v)
+}
+
+func (t *Type) hasEnumValue(v any) bool {
+	for _, e := range t.Enum {
+		if enumEqual(e, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func enumEqual(a, b any) bool {
+	if af, ok := enumFloat(a); ok {
+		bf, ok := enumFloat(b)
+		return ok && af == bf
+	}
+	return a == b
+}
+
+func enumFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
+}
+
+// Join is the type of a value that has either type a or type b.
+func Join(a, b *Type) *Type {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case a.isAny() || b.isAny():
+		return Any
+	case a.Kind == KindNull:
+		return b.OrNil()
+	case b.Kind == KindNull:
+		return a.OrNil()
+	case a.Kind != b.Kind:
+		return Any
+	}
+	out := &Type{Kind: a.Kind, Optional: a.Optional || b.Optional}
+	switch a.Kind {
+	case KindList:
+		out.Elem = Join(a.Elem, b.Elem)
+	case KindObject:
+		out.Open = a.Open || b.Open
+		out.Fields = map[string]*Type{}
+		for k, at := range a.Fields {
+			if bt, ok := b.Fields[k]; ok {
+				out.Fields[k] = Join(at, bt)
+			} else {
+				out.Fields[k] = at.OrNil()
+			}
+		}
+		for k, bt := range b.Fields {
+			if _, ok := a.Fields[k]; !ok {
+				out.Fields[k] = bt.OrNil()
+			}
+		}
+		if a.Open && b.Open {
+			out.Elem = Join(a.Elem, b.Elem)
+		}
+	}
+	if len(a.Enum) > 0 && len(b.Enum) > 0 {
+		out.Enum = append([]any(nil), a.Enum...)
+		for _, v := range b.Enum {
+			if !out.hasEnumValue(v) {
+				out.Enum = append(out.Enum, v)
+			}
+		}
+	}
+	return out
+}

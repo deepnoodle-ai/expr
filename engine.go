@@ -36,6 +36,7 @@ package expr
 import (
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/scanner"
 	"go/token"
@@ -211,12 +212,13 @@ func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 	// rewrites bare composite literals; preprocessSource handles the
 	// keyword rewrites (`map`) so the parser accepts them as
 	// identifiers.
-	parsed := preprocessSource(jsonlit.Rewrite(optaccess.Rewrite(code)))
+	parsed := preprocessSource(rewriteKeywordFields(jsonlit.Rewrite(optaccess.Rewrite(code))))
 	fset := token.NewFileSet()
 	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
 	}
+	restoreKeywordFields(node)
 	// Desugar pipe expressions (`a | f(x)` → `f(a, x)`) before
 	// validation so validate and the evaluator only ever see ordinary
 	// call nodes. See pipe.go.
@@ -342,6 +344,55 @@ func preprocessSource(src string) string {
 	}
 	out.WriteString(src[last:])
 	return out.String()
+}
+
+// keywordFieldPrefix marks a field name that is a Go keyword. Go's parser
+// rejects `x.type`, so rewriteKeywordFields renames the field before
+// parsing and restoreKeywordFields puts the real name back on the
+// SelectorExpr, which the evaluator then looks up as written.
+const keywordFieldPrefix = "__expr_kw_"
+
+// rewriteKeywordFields renames every Go keyword that directly follows a
+// `.` (`event.type`, `item.range`, `x.map`) so the expression parses.
+func rewriteKeywordFields(src string) string {
+	if !strings.Contains(src, ".") {
+		return src
+	}
+	fs := token.NewFileSet()
+	file := fs.AddFile("expr", fs.Base(), len(src))
+	var s scanner.Scanner
+	s.Init(file, []byte(src), nil, 0)
+	var out strings.Builder
+	last := 0
+	prev := token.ILLEGAL
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if prev == token.PERIOD && tok.IsKeyword() {
+			off := file.Offset(pos)
+			out.WriteString(src[last:off])
+			out.WriteString(keywordFieldPrefix + lit)
+			last = off + len(lit)
+		}
+		prev = tok
+	}
+	if last == 0 {
+		return src
+	}
+	out.WriteString(src[last:])
+	return out.String()
+}
+
+// restoreKeywordFields undoes rewriteKeywordFields on the parsed tree.
+func restoreKeywordFields(node ast.Node) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			sel.Sel.Name = strings.TrimPrefix(sel.Sel.Name, keywordFieldPrefix)
+		}
+		return true
+	})
 }
 
 func containsAnyRewriteKeyword(src string) bool {
