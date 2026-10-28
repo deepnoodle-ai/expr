@@ -133,6 +133,39 @@ p, err := expr.Compile(
 )
 ```
 
+## Type checking
+
+Expressions are often written ahead of time, in a config file, a rule, or
+a workflow definition. `Program.Check` finds their mistakes when they are
+saved instead of when some input finally hits the broken branch. Describe
+the env's types once:
+
+```go
+env := map[string]*expr.Type{
+    "issue": expr.ObjectOf(map[string]*expr.Type{
+        "kind":  expr.EnumOf("bug", "feature", "question"),
+        "title": expr.String(),
+    }),
+    "review": expr.ObjectOf(map[string]*expr.Type{"body": expr.String()}).OrNil(),
+    "event":  expr.Any, // unchecked
+}
+
+p, _ := expr.Compile(`issue.kind == "bugfix" || len(review.body) > 0`, expr.WithBuiltins())
+t, err := p.Check(env)
+// expr: type error:
+//   `issue.kind == "bugfix"`: the value is one of "bug" | "feature" | "question", never "bugfix";
+//   `review`: may be nil here; use ?. or try(...)
+```
+
+`Check` reports every problem at once: unknown names and fields (with
+"did you mean"), operations on the wrong kind of value, builtin calls
+with the wrong arguments, reads of values that may be nil, and
+comparisons that can never be true. It returns the result type too, so a
+host can insist that a condition is a `bool`. `Any` turns checking off
+for a value, so you can start loosely and add types where mistakes hurt.
+[The type checking guide](docs/guides/type-checking.md) covers the
+details.
+
 ## JSON-style literals
 
 Object and array literals work the way you'd hope, without the Go ceremony:
@@ -219,14 +252,13 @@ define new functions from inside an expression.
 [`cel-go`](https://github.com/google/cel-go) are the obvious neighbors. Both
 are excellent, and both are much larger. `expr` is deliberately smaller:
 
-| Library           | Non-test Go LOC | Parser          | Notes                                        |
-| ----------------- | --------------- | --------------- | -------------------------------------------- |
-| `deepnoodle/expr` | ~4k             | `go/parser`     | Go subset, JSON literals, `${...}` templates |
-| `expr-lang/expr`  | ~30k            | Custom          | Own grammar, optimizer, type checker         |
-| `cel-go`          | ~70.0k          | Custom (protos) | CEL spec, protobuf-native, type system       |
+| Library           | Non-test Go LOC | Parser          | Notes                                                      |
+| ----------------- | --------------- | --------------- | ---------------------------------------------------------- |
+| `deepnoodle/expr` | ~7k             | `go/parser`     | Go subset, JSON literals, `${...}` templates, type checker |
+| `expr-lang/expr`  | ~30k            | Custom          | Own grammar, optimizer, type checker                       |
+| `cel-go`          | ~70.0k          | Custom (protos) | CEL spec, protobuf-native, type system                     |
 
-That's an order of magnitude smaller than `expr-lang`, nearly two than
-`cel-go`. You give up a pile of features you may never need. In exchange: no
+That's about a quarter the size of `expr-lang` and a tenth of `cel-go`. You give up a pile of features you may never need. In exchange: no
 dependencies, low complexity, and syntax anyone who writes Go already knows.
 
 ## Performance
@@ -271,8 +303,8 @@ go test -run=^$ -bench=. -benchtime=300ms ./... | go run ./chart ../../docs/asse
 
 - [`docs/reference/spec.md`](docs/reference/spec.md) is the authoritative language reference.
 - [`docs/guides/`](docs/guides/) has deeper guides on registering Go
-  functions, designing an env, sandboxing untrusted expressions, using
-  templates in anger, and higher-order patterns. Start with
+  functions, designing an env, type checking, sandboxing untrusted
+  expressions, using templates in anger, and higher-order patterns. Start with
   [`examples.md`](docs/guides/examples.md) for worked multi-line expressions.
 - [`examples/`](examples/) has runnable versions of everything above.
 - [`llms.txt`](llms.txt) is a condensed reference sized for LLM context

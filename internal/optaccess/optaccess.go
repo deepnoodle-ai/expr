@@ -157,17 +157,12 @@ func isQuestion(src string, t tokenInfo) bool {
 }
 
 // isFieldToken reports whether t can be the field name after `?.`.
-// Plain identifiers are the normal case; `map` and `if` are accepted
-// too because expr lets those keywords act as ordinary identifiers
-// (the engine rewrites `.map` / `.if` selectors on the non-optional
-// path), and the field name is spliced into a string literal here, so
-// no keyword rewrite is needed downstream.
+// Plain identifiers are the normal case; any Go keyword is accepted too,
+// because expr allows keywords as field names (`event?.type`). The field
+// name is spliced into a string literal here, so no keyword rewrite is
+// needed downstream.
 func isFieldToken(t token.Token) bool {
-	switch t {
-	case token.IDENT, token.MAP, token.IF:
-		return true
-	}
-	return false
+	return t == token.IDENT || t.IsKeyword()
 }
 
 // matchBracketForward finds the index of the `]` that closes the `[`

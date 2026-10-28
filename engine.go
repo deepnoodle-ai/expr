@@ -31,11 +31,22 @@
 //
 //	t, err := expr.NewTemplate("Hello ${user.name}!", expr.WithBuiltins())
 //	out, err := t.Render(ctx, env)
+//
+// # Type checking
+//
+// [Program.Check] checks an expression against the [Type] of each env
+// name without running it, and reports every problem as a [*TypeError]:
+// unknown names and fields, wrong-kind operations and builtin arguments,
+// reads of values that may be nil, and comparisons that are never true.
+//
+//	env := map[string]*expr.Type{"user": expr.ObjectOf(map[string]*expr.Type{"name": expr.String()})}
+//	t, err := p.Check(env)
 package expr
 
 import (
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/scanner"
 	"go/token"
@@ -206,17 +217,19 @@ func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 	if len(cfg.errs) > 0 {
 		return nil, fmt.Errorf("%w: %w", ErrCompile, errors.Join(cfg.errs...))
 	}
-	// Pipeline order: optaccess turns `?.`/`?[` into sentinel calls
-	// while the source still uses raw operator syntax; jsonlit then
-	// rewrites bare composite literals; preprocessSource handles the
-	// keyword rewrites (`map`) so the parser accepts them as
-	// identifiers.
-	parsed := preprocessSource(jsonlit.Rewrite(optaccess.Rewrite(code)))
+	// Pipeline order: rewriteKeywordFields renames keyword field names
+	// (`x.type`) first, so the later rewrites see an identifier there;
+	// optaccess turns `?.`/`?[` into sentinel calls while the source
+	// still uses raw operator syntax; jsonlit then rewrites bare
+	// composite literals; preprocessSource handles the keyword rewrites
+	// (`map`) so the parser accepts them as identifiers.
+	parsed := preprocessSource(jsonlit.Rewrite(optaccess.Rewrite(rewriteKeywordFields(code))))
 	fset := token.NewFileSet()
 	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
 	}
+	restoreKeywordFields(node)
 	// Desugar pipe expressions (`a | f(x)` → `f(a, x)`) before
 	// validation so validate and the evaluator only ever see ordinary
 	// call nodes. See pipe.go.
@@ -342,6 +355,62 @@ func preprocessSource(src string) string {
 	}
 	out.WriteString(src[last:])
 	return out.String()
+}
+
+// keywordFieldPrefix marks a field name that is a Go keyword. Go's parser
+// rejects `x.type`, so rewriteKeywordFields renames the field before
+// parsing and restoreKeywordFields puts the real name back on the
+// SelectorExpr, which the evaluator then looks up as written.
+const keywordFieldPrefix = "__expr_kw_"
+
+// rewriteKeywordFields renames every Go keyword that directly follows a
+// `.` (`event.type`, `item.range`, `x.map`) so the expression parses. It
+// leaves `?.type` alone: optaccess puts that name in a string literal.
+func rewriteKeywordFields(src string) string {
+	if !strings.Contains(src, ".") {
+		return src
+	}
+	fs := token.NewFileSet()
+	file := fs.AddFile("expr", fs.Base(), len(src))
+	var s scanner.Scanner
+	s.Init(file, []byte(src), nil, 0)
+	var out strings.Builder
+	last := 0
+	// period is set when the previous token is a `.` that is not part
+	// of `?.`.
+	period, question := false, false
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if period && tok.IsKeyword() {
+			off := file.Offset(pos)
+			out.WriteString(src[last:off])
+			out.WriteString(keywordFieldPrefix + lit)
+			last = off + len(lit)
+		}
+		period = tok == token.PERIOD && !question
+		question = tok == token.ILLEGAL && lit == "?"
+	}
+	if last == 0 {
+		return src
+	}
+	out.WriteString(src[last:])
+	return out.String()
+}
+
+// restoreKeywordFields undoes rewriteKeywordFields on the parsed tree.
+func restoreKeywordFields(node ast.Node) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			// Restore only names the rewrite made: the rest must be a keyword.
+			if name, cut := strings.CutPrefix(sel.Sel.Name, keywordFieldPrefix); cut && token.Lookup(name).IsKeyword() {
+				sel.Sel.Name = name
+			}
+		}
+		return true
+	})
 }
 
 func containsAnyRewriteKeyword(src string) bool {

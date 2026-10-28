@@ -297,6 +297,13 @@ rather than choosing one by declaration order.
 Selectors chain left-to-right: `a.b.c` is `(a.b).c`. Selector chains are
 limited by [evaluation depth](#limits-and-safety).
 
+The field name may be a Go keyword: `event.type`, `item.range`,
+`x.default`, `x?.type`. JSON payloads use these names freely. Keywords
+stay keywords everywhere else.
+
+Identifiers beginning with `__expr_` or `__try_` are reserved for expr's
+internal use. This applies to field names as well.
+
 ## Index expressions (`x[i]`)
 
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
@@ -717,6 +724,59 @@ of `?.` / `?[`, operand-returning `||`, and `try(value, default)`
 covers the same use cases. When the LHS is a meaningful falsey value
 that should be kept (`0`, `""`, `[]`), use `try(x, default)`
 explicitly.
+
+## Static type checking
+
+`Program.Check(env map[string]*Type, opts...)` checks an expression
+against the types of its environment without evaluating it, and returns
+the result type. `Template.Check` does the same for every `${...}`.
+
+A `Type` has a kind (any, nil, bool, number, string, list, object), an
+element type for lists, fields for objects (closed unless `Open`), an
+`Optional` flag (the value may be nil), and an optional `Enum`. Literals
+type as single-value enums, so `{"verdict": "APPROVE"}` types as
+`{verdict: "APPROVE"}`.
+
+Check reports, as a `*TypeError` wrapping `ErrType`, every:
+
+- name not in env, scope or the registered functions;
+- field a closed object does not have (also through `?.`);
+- field read, index or arithmetic on a value that may be nil, except
+  through `?.`, `?[` or inside the first argument of `try`;
+- operation on the wrong kind (adding a number and a string, ordering a
+  bool, iterating a non-list, indexing a list with a string or an object
+  with a number);
+- builtin call with the wrong number of arguments, or an argument of a
+  kind the builtin rejects at run time (`len(5)`, `split(s, 1)`,
+  `join([1, 2], ",")`, `sort("abc")`), or nil where it does not accept
+  nil (`upper(nil)`, `has(m, nil)`);
+- object key that may be absent: an unlisted field of an open object
+  with a typed `Elem`, or an index by a string that is not a literal
+  (`scores[name]`), unless read with `?.`/`?[` or inside `try`;
+- object literal key that is not a string or may be nil;
+- `==`/`!=` that can never be true: different kinds, or a literal outside
+  the other side's enum (`kind == "bugfix"` when kind is
+  `"bug_fix" | "feature"`).
+
+`&&` and `||` return one of their operands (see Logical), so they type
+as the join of their operand types: `bool` only when both sides are. Joining
+types of different kinds gives a union (`0 | string` for `s || 0`), which
+arithmetic, ordering, field reads and indexing reject: they need one kind. A
+builtin accepts a union only when it accepts every member, and `==` reports
+one that shares no kind with the other side. A
+nil check narrows: in `x != nil && x.a > 3`, `x == nil || x.a > 3` and
+`if(x != nil, x.a, 0)`, `x` is known not to be nil where it is read. A field
+an open object does not list may be absent, so it is read with `?.`.
+`==` and `!=` on lists or objects are reported, since Run rejects them.
+
+`Any` disables checking for the value and everything derived from it, so a
+partly typed env checks what it can. A nil `*Type`, in env or in `Fields`,
+means `Any`. Calls resolve as Run resolves them:
+a name in env, then a registered function, then a special form, so a host
+function named `count` replaces the form. Builtins and the optional groups
+have signatures; other registered functions return `Any` unless declared
+with `WithFuncType`. Check is static: a passing check does not prove Run
+succeeds (a list index can still be out of range).
 
 ## Helpful errors
 

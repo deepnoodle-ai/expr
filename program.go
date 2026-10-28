@@ -154,8 +154,10 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 		// Skip logical ops: their short-circuit semantics are visible
 		// to side-effects, and the LAND/LOR path in evalBinary is
 		// fast enough that folding a pure-literal `true && false`
-		// isn't worth a second code path.
-		if n.Op != token.LAND && n.Op != token.LOR {
+		// isn't worth a second code path. Skip == and != too: they
+		// never fail, so folding `"a" == 1` to false would hide a
+		// comparison that is never true from Check.
+		if n.Op != token.LAND && n.Op != token.LOR && n.Op != token.EQL && n.Op != token.NEQ {
 			if xv, ok := p.constValue(n.X); ok {
 				if yv, ok2 := p.constValue(n.Y); ok2 {
 					if v, err := applyBinary(n.Op, xv, yv); err == nil {

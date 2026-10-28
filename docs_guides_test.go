@@ -731,3 +731,116 @@ func TestGuide_HigherOrder_Pipelines(t *testing.T) {
 		t.Fatal("expected non-call pipe right side to fail compilation")
 	}
 }
+
+// --- type-checking.md ---------------------------------------------------------
+
+func TestGuide_TypeChecking(t *testing.T) {
+	env := map[string]*Type{
+		"issue": ObjectOf(map[string]*Type{
+			"kind":   EnumOf("bug", "feature", "question"),
+			"title":  String(),
+			"labels": ListOf(String()),
+			"score":  Number(),
+		}),
+		"review": ObjectOf(map[string]*Type{
+			"verdict": EnumOf("approve", "reject"),
+			"body":    String(),
+		}).OrNil(),
+		"event": OpenObject(map[string]*Type{
+			"type":   String(),
+			"sender": OpenObject(map[string]*Type{"login": String()}),
+		}),
+	}
+	check := func(src string, opts ...CheckOption) (*Type, error) {
+		p, err := Compile(src, WithBuiltins(), WithFunctions(StringFuncs()))
+		if err != nil {
+			t.Fatalf("compile %s: %v", src, err)
+		}
+		return p.Check(env, opts...)
+	}
+	for src, want := range map[string]string{
+		`issue.kind == "bug" && issue.score > 0.5`:                      "bool",
+		`map(filter(issue.labels, startsWith(it, "area/")), upper(it))`: "list<string>",
+		`{"title": issue.title, "kind": issue.kind}`:                    `{kind: "bug" | "feature" | "question", title: string}`,
+		`review?.verdict`:                              `("approve" | "reject")?`,
+		`try(review.body, "no review")`:                "string",
+		`review != nil && review.verdict == "approve"`: "bool",
+		`event.action`:                                 "any",
+		`issue.title || "untitled"`:                    "string",
+		`issue.title || 0`:                             "0 | string",
+	} {
+		got, err := check(src)
+		if err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+		if got.String() != want {
+			t.Fatalf("%s: got %s, want %s", src, got, want)
+		}
+	}
+	for src, want := range map[string]string{
+		`issue.titel`:               `no field "titel" in {kind: "bug" | "feature" | "question", labels: list<string>, score: number, title: string} (did you mean "title"?)`,
+		`issue.kind == "bugfix"`:    `the value is one of "bug" | "feature" | "question", never "bugfix"`,
+		`review.verdict`:            "`review`: may be nil here; use ?. or try(...)",
+		`issue.score + issue.title`: "cannot add number and string",
+		`split(issue.title, 1)`:     "split: argument 2 must be string, not number",
+		`issue.labels[issue.title]`: "list index must be a number, not string",
+		`len(issue.title || 0)`:     "len: argument 1 may be number, and must be string or a list or an object",
+	} {
+		_, err := check(src)
+		if !errors.Is(err, ErrType) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: got %v, want %q", src, err, want)
+		}
+	}
+
+	// WithFuncType.
+	p, err := Compile(`concat(issue.labels, issue.labels)`, WithFunctions(map[string]any{
+		"concat": func(a, b []any) []any { return append(a, b...) },
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Check(env, WithFuncType("concat", func(args []*Type) (*Type, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("concat expects 2 arguments, got %d", len(args))
+		}
+		return Join(args[0], args[1]), nil
+	}))
+	if err != nil || got.String() != "list<string>" {
+		t.Fatalf("concat: %v, %v", got, err)
+	}
+
+	// Template.Check.
+	tmpl, err := NewTemplate("${issue.title} (${issue.knd})", WithBuiltins())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpl.Check(env); err == nil || !strings.Contains(err.Error(), `(did you mean "kind"?)`) {
+		t.Fatalf("template: %v", err)
+	}
+}
+
+// The README's type checking example.
+func TestReadme_TypeChecking(t *testing.T) {
+	env := map[string]*Type{
+		"issue": ObjectOf(map[string]*Type{
+			"kind":  EnumOf("bug", "feature", "question"),
+			"title": String(),
+		}),
+		"review": ObjectOf(map[string]*Type{"body": String()}).OrNil(),
+		"event":  Any,
+	}
+	p, err := Compile(`issue.kind == "bugfix" || len(review.body) > 0`, WithBuiltins())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Check(env)
+	var te *TypeError
+	if !errors.As(err, &te) {
+		t.Fatalf("got %v", err)
+	}
+	want := []string{
+		"`issue.kind == \"bugfix\"`: the value is one of \"bug\" | \"feature\" | \"question\", never \"bugfix\"",
+		"`review`: may be nil here; use ?. or try(...)",
+	}
+	assertDeepEqual(t, te.Problems, want)
+}

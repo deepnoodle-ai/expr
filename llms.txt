@@ -452,6 +452,35 @@ if errors.Is(err, expr.ErrCompile) { /* ... */ }
 if errors.Is(err, expr.ErrEvaluate) { /* ... */ }
 ```
 
+## Static type checking
+
+```go
+env := map[string]*expr.Type{
+    "classify": expr.ObjectOf(map[string]*expr.Type{"kind": expr.EnumOf("bug_fix", "feature")}),
+    "report":   expr.ObjectOf(map[string]*expr.Type{"verdict": expr.String()}).OrNil(),
+    "event":    expr.Any,
+}
+t, err := p.Check(env, expr.WithFuncType("concat", concatType))
+// errors.Is(err, expr.ErrType); err.(*expr.TypeError).Problems lists every problem
+```
+
+Types: `expr.Any`, `Null()`, `Bool()`, `Number()`, `String()`, `EnumOf(...)`,
+`ListOf(t)`, `ObjectOf(fields)` (closed), `OpenObject(fields)`, `t.OrNil()`,
+`t.NonNil()`, `Join(a, b)`. Check catches unknown names and fields,
+reads of maybe-nil values without `?.`/`try`, wrong-kind operations,
+builtin calls with the wrong arguments, and comparisons that are never
+true (including against an enum). A nil `*Type` means `Any`.
+
+`Template.Check(env)` checks every `${...}`. `WithFuncType(name, fn)` types
+a registered function: `fn(args []*expr.Type) (*expr.Type, error)` returns
+the result type or an error to report. Without it, registered functions
+return `Any`. Names resolve as in Run: env, then registered functions, then
+the forms. An open object's unlisted fields are `Any` unless `Elem` is set;
+reading a key that may be absent needs `?.`/`?[`. Guide:
+`docs/guides/type-checking.md`.
+
+Field names may be Go keywords: `event.type`, `x?.range`.
+
 ## Cancellation
 
 `Program.Run(ctx, env)` checks `ctx.Err()` before dispatching each AST

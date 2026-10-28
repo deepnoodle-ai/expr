@@ -18,13 +18,14 @@ parameter interpolation.
 
 | File                | Purpose                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| `engine.go`         | `Compile`, `Option`, `map`/`if` keyword preprocessing              |
+| `engine.go`         | `Compile`, `Option`, `map`/`if` and keyword field preprocessing    |
 | `program.go`        | AST walker — the evaluator                                         |
 | `reflect.go` + `prepared.go` | Env lookup, function dispatch, cached signatures          |
 | `builtins.go`       | Default function set exposed by `Builtins()` / `WithBuiltins()`    |
 | `builtin_groups.go` | Opt-in `MathFuncs()` / `StringFuncs()` / `CollectionFuncs()` sets  |
 | `higher_order.go`   | `map`, `filter`, `any`, `all`, `find`, `count`, `try`, `if` forms  |
 | `identifiers.go`    | `Program.Identifiers()` — env-referenced name collection           |
+| `types.go` + `check.go` | `Type` and `Program.Check` / `Template.Check` — static type checking |
 | `template.go`       | `${...}` interpolation via `NewTemplate` / `Render`                |
 | `truthy.go`         | `IsTruthy` rules used by `!`, `&&`, `\|\|`, `bool(v)`              |
 | `suggest.go`        | "Did you mean…" for unknown identifiers                            |
@@ -40,6 +41,11 @@ parameter interpolation.
 - The `map` identifier is rewritten to an internal sentinel (`mapFormName`) before
   parsing because Go treats `map` as a keyword.
 - Errors wrap `ErrCompile` or `ErrEvaluate` — preserve that so callers can `errors.Is`.
+  `Check` errors wrap `ErrType`.
+- `Check` must agree with `Run`. When you change what an operator, builtin or
+  form accepts at run time, change `check.go` to match (`builtinSigs` for
+  builtins), and add the case to `TestCheckMatchesRun`, which runs every
+  rejected expression to confirm `Run` fails too.
 - When changing language behavior, update `docs/reference/spec.md` in the same change; if the
   change affects how expressions *look*, update `docs/guides/examples.md` and `llms.txt` too.
 - Guide pages under `docs/guides/` have runnable companions under `examples/` and
