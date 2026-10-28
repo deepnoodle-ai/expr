@@ -181,6 +181,13 @@ func enumFloat(v any) (float64, bool) {
 	return 0, false
 }
 
+func orAny(t *Type) *Type {
+	if t == nil {
+		return Any
+	}
+	return t
+}
+
 // Join is the type of a value that has either type a or type b.
 func Join(a, b *Type) *Type {
 	switch {
@@ -200,7 +207,7 @@ func Join(a, b *Type) *Type {
 	out := &Type{Kind: a.Kind, Optional: a.Optional || b.Optional}
 	switch a.Kind {
 	case KindList:
-		out.Elem = Join(a.Elem, b.Elem)
+		out.Elem = Join(orAny(a.Elem), orAny(b.Elem))
 	case KindObject:
 		out.Open = a.Open || b.Open
 		out.Fields = map[string]*Type{}
@@ -216,8 +223,13 @@ func Join(a, b *Type) *Type {
 				out.Fields[k] = bt.OrNil()
 			}
 		}
-		if a.Open && b.Open {
-			out.Elem = Join(a.Elem, b.Elem)
+		switch {
+		case a.Open && b.Open:
+			out.Elem = Join(orAny(a.Elem), orAny(b.Elem))
+		case a.Open:
+			out.Elem = a.Elem
+		case b.Open:
+			out.Elem = b.Elem
 		}
 	}
 	if len(a.Enum) > 0 && len(b.Enum) > 0 {

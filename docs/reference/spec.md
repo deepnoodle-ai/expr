@@ -746,6 +746,13 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
   the other side's enum (`kind == "bugfix"` when kind is
   `"bug_fix" | "feature"`).
 
+`&&` and `||` return one of their operands (see Logical), so they type
+as the join of their operand types: `bool` only when both sides are. A
+nil check narrows: in `x != nil && x.a > 3`, `x == nil || x.a > 3` and
+`if(x != nil, x.a, 0)`, `x` is known not to be nil where it is read. A field
+an open object does not list may be absent, so it is read with `?.`.
+`==` and `!=` on lists or objects are reported, since Run rejects them.
+
 `Any` disables checking for the value and everything derived from it, so a
 partly typed env checks what it can. Builtins and the optional groups have
 result types; other registered functions return `Any` unless declared with

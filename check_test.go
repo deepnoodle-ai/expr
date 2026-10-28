@@ -125,3 +125,53 @@ func TestJoin(t *testing.T) {
 	require.Equal(t, "string?", Join(String(), Null()).String())
 	require.Equal(t, "any", Join(String(), Number()).String())
 }
+
+// Regressions from review: each was accepted by Check and failed in Run, or
+// the reverse.
+func TestCheckMatchesRuntime(t *testing.T) {
+	env := map[string]*Type{
+		"a": ObjectOf(map[string]*Type{
+			"n":     Number().OrNil(),
+			"name":  String().OrNil(),
+			"items": ListOf(String()).OrNil(),
+			"flag":  Bool(),
+			"t":     ListOf(String()),
+		}),
+		"scores": &Type{Kind: KindObject, Open: true, Elem: Number()},
+		"loose":  OpenObject(nil),
+	}
+	check := func(src string) (*Type, error) {
+		p, err := Compile(src, WithBuiltins(), WithFunctions(StringFuncs()), WithFunctions(MathFuncs()))
+		require.NoError(t, err, src)
+		return p.Check(env)
+	}
+	for src, want := range map[string]string{
+		`a.flag && a.flag`:                     "bool",
+		`a.items && len(a.items) > 0`:          "any", // a list or a bool: not a boolean
+		`a.name || "anon"`:                     "string",
+		`a.n != nil && a.n > 3`:                "bool",
+		`a.n == nil || a.n > 3`:                "bool",
+		`if(a.name != nil, upper(a.name), "")`: "string",
+		`scores?.alice`:                        "number?",
+		`loose.anything`:                       "any",
+		`len(a.items)`:                         "number",
+		`string(a.n)`:                          "string",
+	} {
+		got, err := check(src)
+		require.NoError(t, err, src)
+		require.Equal(t, want, got.String(), src)
+	}
+	for src, want := range map[string]string{
+		`upper(a.name)`:         "may be nil",
+		`round(a.n)`:            "may be nil",
+		`try(a.n)`:              "try expects 2 arguments",
+		`if(a.flag, 1)`:         "if expects 3 arguments",
+		`a.t == a.t`:            "cannot compare",
+		`scores.alice + 1`:      `field "alice" may be absent`,
+		`a.n > 3 && a.n != nil`: "may be nil",
+	} {
+		_, err := check(src)
+		require.Error(t, err, src)
+		require.Contains(t, err.Error(), want, src)
+	}
+}

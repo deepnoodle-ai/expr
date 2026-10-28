@@ -98,6 +98,71 @@ type checker struct {
 	// lenient is positive inside try's first argument, where a nil
 	// receiver is caught at run time and so is not a problem.
 	lenient int
+	// narrowed counts, by source text, expressions known not to be nil
+	// here: the right side of `x != nil && ...`, the then-branch of
+	// `if(x != nil, ...)`.
+	narrowed map[string]int
+}
+
+// narrowings returns the expressions that cond being truthy (or falsy)
+// proves are not nil.
+func narrowings(cond ast.Expr, truthy bool) []string {
+	switch n := cond.(type) {
+	case *ast.ParenExpr:
+		return narrowings(n.X, truthy)
+	case *ast.UnaryExpr:
+		if n.Op == token.NOT {
+			return narrowings(n.X, !truthy)
+		}
+	case *ast.BinaryExpr:
+		switch {
+		case n.Op == token.LAND && truthy, n.Op == token.LOR && !truthy:
+			return append(narrowings(n.X, truthy), narrowings(n.Y, truthy)...)
+		case n.Op == token.NEQ && truthy, n.Op == token.EQL && !truthy:
+			if isNilIdent(n.Y) {
+				return []string{exprDisplayString(n.X)}
+			}
+			if isNilIdent(n.X) {
+				return []string{exprDisplayString(n.Y)}
+			}
+		}
+	case *ast.Ident, *ast.SelectorExpr, *ast.IndexExpr, *ast.CallExpr:
+		if truthy {
+			return []string{exprDisplayString(cond)}
+		}
+	}
+	return nil
+}
+
+func isNilIdent(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
+}
+
+// narrow checks node with the given expressions known not to be nil.
+func (c *checker) narrow(names []string, node ast.Expr, sc *scope) *Type {
+	if c.narrowed == nil {
+		c.narrowed = map[string]int{}
+	}
+	for _, n := range names {
+		c.narrowed[n]++
+	}
+	t := c.check(node, sc)
+	for _, n := range names {
+		c.narrowed[n]--
+	}
+	return t
+}
+
+// applyNarrowing drops Optional from a value narrowed by its context.
+func (c *checker) applyNarrowing(node ast.Expr, t *Type) *Type {
+	if len(c.narrowed) == 0 || t == nil || !t.Optional {
+		return t
+	}
+	if c.narrowed[exprDisplayString(node)] > 0 {
+		return t.NonNil()
+	}
+	return t
 }
 
 // scope holds the names a higher-order form binds.
@@ -131,6 +196,14 @@ func (c *checker) nilCheck(node ast.Expr, t *Type) {
 }
 
 func (c *checker) check(node ast.Expr, sc *scope) *Type {
+	switch node.(type) {
+	case *ast.Ident, *ast.SelectorExpr, *ast.IndexExpr, *ast.CallExpr:
+		return c.applyNarrowing(node, c.checkNode(node, sc))
+	}
+	return c.checkNode(node, sc)
+}
+
+func (c *checker) checkNode(node ast.Expr, sc *scope) *Type {
 	switch n := node.(type) {
 	case *ast.Ident:
 		return c.ident(n, sc)
@@ -217,10 +290,20 @@ func plain(t *Type) *Type {
 }
 
 func (c *checker) binary(n *ast.BinaryExpr, sc *scope) *Type {
+	switch n.Op {
+	case token.LAND:
+		// `a && b` is a when a is falsy, else b.
+		l := c.check(n.X, sc)
+		r := c.narrow(narrowings(n.X, true), n.Y, sc)
+		return Join(l, r)
+	case token.LOR:
+		// `a || b` is a when a is truthy (so never nil), else b.
+		l := c.check(n.X, sc)
+		r := c.narrow(narrowings(n.X, false), n.Y, sc)
+		return Join(l.NonNil(), r)
+	}
 	l, r := c.check(n.X, sc), c.check(n.Y, sc)
 	switch n.Op {
-	case token.LAND, token.LOR:
-		return Bool()
 	case token.EQL, token.NEQ:
 		c.comparable(n, l, r)
 		return Bool()
@@ -264,6 +347,10 @@ func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 	if l.isAny() || r.isAny() || l.Kind == KindNull || r.Kind == KindNull {
 		return
 	}
+	if l.Kind == KindList || l.Kind == KindObject || r.Kind == KindList || r.Kind == KindObject {
+		c.report(n, "cannot compare %s and %s with %s", l.NonNil(), r.NonNil(), n.Op)
+		return
+	}
 	if l.Kind != r.Kind {
 		c.report(n, "comparing %s with %s is never true", l.NonNil(), r.NonNil())
 		return
@@ -299,9 +386,17 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 	switch {
 	case ok:
 	case recv.Open:
+		// An unlisted field may be absent, and selecting a missing key
+		// fails at run time; only ?. reads it safely.
 		f = recv.Elem
 		if f == nil {
 			f = Any
+		}
+		if f.Kind != KindAny {
+			if !optional && c.lenient == 0 {
+				c.report(n, "field %q may be absent; use ?.", name)
+			}
+			f = f.OrNil()
 		}
 	default:
 		names := make([]string, 0, len(recv.Fields))
@@ -391,21 +486,23 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 		return c.index(n, n.Args[0], recv, n.Args[1], c.check(n.Args[1], sc), true).OrNil()
 	case iteratingForms[name]:
 		return c.iterating(n, displayIdent(name), sc)
-	case name == "try" && (len(n.Args) == 1 || len(n.Args) == 2):
+	case name == "try":
+		if len(n.Args) != 2 {
+			c.report(n, "try expects 2 arguments (value, default), got %d", len(n.Args))
+			return Any
+		}
 		c.lenient++
 		a := c.check(n.Args[0], sc)
 		c.lenient--
-		if len(n.Args) == 1 {
-			return a.OrNil()
-		}
 		return Join(a, c.check(n.Args[1], sc))
-	case name == ifFuncName && (len(n.Args) == 2 || len(n.Args) == 3):
-		c.check(n.Args[0], sc)
-		then := c.check(n.Args[1], sc)
-		if len(n.Args) == 2 {
-			return then.OrNil()
+	case name == ifFuncName:
+		if len(n.Args) != 3 {
+			c.report(n, "if expects 3 arguments (cond, then, else), got %d", len(n.Args))
+			return Any
 		}
-		return Join(then, c.check(n.Args[2], sc))
+		c.check(n.Args[0], sc)
+		then := c.narrow(narrowings(n.Args[0], true), n.Args[1], sc)
+		return Join(then, c.narrow(narrowings(n.Args[0], false), n.Args[2], sc))
 	}
 
 	args := make([]*Type, len(n.Args))
@@ -432,12 +529,25 @@ func (c *checker) call(n *ast.CallExpr, sc *scope) *Type {
 		c.report(n, "undefined function %q", display)
 		return Any
 	}
+	if nilIntolerant[display] {
+		for i, a := range args {
+			c.nilCheck(n.Args[i], a)
+		}
+	}
 	t, err := fn(args)
 	if err != nil {
 		c.report(n, "%v", err)
 		return Any
 	}
 	return t
+}
+
+// nilIntolerant are the builtins that fail on a nil argument. The rest
+// (len, string, int, first, keys, sum, ...) treat nil as empty.
+var nilIntolerant = map[string]bool{
+	"abs": true, "ceil": true, "floor": true, "round": true, "min": true, "max": true,
+	"upper": true, "lower": true, "trim": true, "replace": true, "split": true,
+	"startsWith": true, "endsWith": true, "slice": true,
 }
 
 func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
