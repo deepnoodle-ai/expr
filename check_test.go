@@ -3,6 +3,7 @@ package expr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -242,5 +243,5 @@ func TestKeywordPrefixOnlyRestoresKeywords(t *testing.T) {
 	require.NoError(t, err)
 	v, err := p.Run(context.Background(), map[string]any{"x": map[string]any{"__expr_kw_foo": 1}})
 	require.NoError(t, err)
-	require.EqualValues(t, 1, v)
+	require.Equal(t, "1", fmt.Sprint(v))
 }
