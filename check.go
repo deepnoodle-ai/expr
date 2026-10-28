@@ -767,7 +767,7 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			elem = Join(elem, c.check(e, sc))
 		}
 		if elem == nil {
-			elem = Any
+			elem = empty
 		}
 		return ListOf(elem)
 	case *ast.MapType:

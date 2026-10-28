@@ -249,6 +249,12 @@ func union(a, b *Type) *Type {
 	return &Type{Kind: KindAny, Variants: out, Optional: optional}
 }
 
+// empty is the element type of an empty list literal. A list with no
+// elements fits any element type, so Join keeps the other side's: the
+// fallback in `xs || []` or `if(c, xs, [])` keeps xs's element type. Alone
+// it is unchecked, like Any.
+var empty = &Type{Kind: KindAny}
+
 func orAny(t *Type) *Type {
 	if t == nil {
 		return Any
@@ -262,6 +268,10 @@ func Join(a, b *Type) *Type {
 	case a == nil:
 		return b
 	case b == nil:
+		return a
+	case a == empty:
+		return b
+	case b == empty:
 		return a
 	case a.isAny() || b.isAny():
 		return Any
