@@ -1115,7 +1115,11 @@ to find calls they must prepare before a `Run`, for example functions
 whose answers come from outside the program.
 
 An argument program runs and type-checks like any program. Its
-`Source()` is the argument printed back in display form.
+`Source()` is the argument printed back in display form. An argument of a
+`Bound` call that reads `it`, `index` or a named element has them only per
+element, inside the form: run on its own, it fails to resolve them. Inside
+a three-arg form's body, a call of the binding's name calls the element,
+so it is not reported.
 
 `Program.Literal()` returns the value of an expression that is only a
 literal: a string, number, bool or nil, or a list or object of literals.
@@ -1124,12 +1128,13 @@ come back as `int64` or `float64`, lists as `[]any`, objects as
 `map[string]any`.
 
 ```go
-p, _ := expr.Compile(`ask("Is it urgent?", ticket.body) > 0.8`, opts...)
+p, _ := expr.Compile(`false && ask("Is it urgent?", ticket.body) > 0.8`, opts...)
 for _, c := range p.Calls("ask") {
     q, isLit := c.Args[0].Literal()   // "Is it urgent?", true
-    subject := c.Args[1]              // a *Program for ticket.body
-    _, _, _ = q, isLit, subject
+    v, _ := c.Args[1].Run(ctx, env)   // ticket.body's value
+    fmt.Println(c.Args[1].Source(), c.Bound, q, isLit, v)
 }
+// ticket.body false Is it urgent? true <the body>
 ```
 
 ## Error model

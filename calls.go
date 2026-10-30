@@ -8,7 +8,9 @@ type Call struct {
 	Name string
 	// Args holds each argument as its own Program, compiled with the
 	// options of the program it came from. A pipe is already desugared:
-	// `a | f(x)` reports f with Args a and x.
+	// `a | f(x)` reports f with Args a and x. An argument of a Bound call
+	// that reads `it`, `index` or a named element has those only per
+	// element, inside the form: run on its own, it fails to resolve them.
 	Args []*Program
 	// Bound is true when the call sits in the body of an iterating form
 	// (map, filter, flatMap, any, all, find, count, sortBy), where the
@@ -32,11 +34,15 @@ func (p *Program) Calls(names ...string) []Call {
 		want[n] = true
 	}
 	var out []Call
-	p.walkCalls(p.root, false, want, &out)
+	p.walkCalls(p.root, nil, want, &out)
 	return out
 }
 
-func (p *Program) walkCalls(node ast.Expr, bound bool, want map[string]bool, out *[]Call) {
+// walkCalls records the calls of the wanted functions under node. bound
+// holds the element bindings of the enclosing iterating forms: non-nil
+// means the node runs per element, and a call of a bound name calls the
+// element, not the function.
+func (p *Program) walkCalls(node ast.Expr, bound *boundIdents, want map[string]bool, out *[]Call) {
 	switch n := node.(type) {
 	case *ast.ParenExpr:
 		p.walkCalls(n.X, bound, want, out)
@@ -63,15 +69,18 @@ func (p *Program) walkCalls(node ast.Expr, bound bool, want map[string]bool, out
 		ident, _ := n.Fun.(*ast.Ident)
 		if ident != nil && itBindingForms[ident.Name] {
 			if _, shadowed := p.funcs[displayIdent(ident.Name)]; !shadowed {
-				if coll, _, body, err := splitFormArgs(ident.Name, n); err == nil {
+				if coll, bind, body, err := splitFormArgs(ident.Name, n); err == nil {
 					p.walkCalls(coll, bound, want, out)
-					p.walkCalls(body, true, want, out)
+					if bind == "" {
+						bind = "it"
+					}
+					p.walkCalls(body, &boundIdents{element: bind, parent: bound}, want, out)
 					return
 				}
 			}
 		}
-		if ident != nil && want[displayIdent(ident.Name)] {
-			c := Call{Name: displayIdent(ident.Name), Bound: bound}
+		if ident != nil && want[displayIdent(ident.Name)] && !bound.has(displayIdent(ident.Name)) {
+			c := Call{Name: displayIdent(ident.Name), Bound: bound != nil}
 			for _, a := range n.Args {
 				c.Args = append(c.Args, p.sub(a))
 			}

@@ -72,6 +72,26 @@ func TestCalls_Bound(t *testing.T) {
 	require.False(t, coll[0].Bound) // the collection is evaluated once
 }
 
+func TestCalls_NamedBindingShadows(t *testing.T) {
+	// Inside the body, ask names the element, so ask(...) is not a call
+	// of the function; its argument still is walked.
+	require.Len(t, compileCalls(t, `map(xs, ask, ask("a?", ask))`, "ask"), 0)
+	calls := compileCalls(t, `map(xs, ask, ask(pick("b?", ask, ["p"])))`, "ask", "pick")
+	require.Len(t, calls, 1)
+	require.Equal(t, "pick", calls[0].Name)
+	// Outside the body the name is the function again.
+	require.Len(t, compileCalls(t, `map(xs, ask, ask) == [] || ask("c?", xs) > 0`, "ask"), 1)
+}
+
+func TestCalls_BoundArgumentRunsOnlyPerElement(t *testing.T) {
+	calls := compileCalls(t, `any(xs, ask("a?", it.body) > 0.5)`, "ask")
+	require.Len(t, calls, 1)
+	require.True(t, calls[0].Bound)
+	_, err := calls[0].Args[1].Run(context.Background(), map[string]any{"xs": []any{}})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrEvaluate)
+}
+
 func TestCalls_Pipe(t *testing.T) {
 	calls := compileCalls(t, `x | ask("a?") > 0`, "ask")
 	require.Len(t, calls, 1)
