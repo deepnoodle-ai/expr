@@ -447,6 +447,13 @@ a three-arg form body is included (the form does not bind it).
 Useful for validating an expression against a known env shape at load
 time or tracking dependency sets for cache invalidation.
 
+`Program.Calls(names...)` returns each call of the named registered
+functions in source order, nested calls and calls in skipped branches
+included. Each `Call` has `Name`, `Args []*Program` (each argument as its
+own program) and `Bound` (inside an iterating form's body). Pipes are
+desugared first. `Program.Literal()` returns `(value, true)` when the
+whole expression is a literal or a list or object of literals.
+
 ```go
 if errors.Is(err, expr.ErrCompile) { /* ... */ }
 if errors.Is(err, expr.ErrEvaluate) { /* ... */ }
