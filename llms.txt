@@ -473,8 +473,8 @@ t, err := p.Check(env, expr.WithFuncType("concat", concatType))
 
 Types: `expr.Any`, `Null()`, `Bool()`, `Number()`, `String()`, `EnumOf(...)`,
 `ListOf(t)`, `ObjectOf(fields)` (closed), `OpenObject(fields)`, `t.OrNil()`,
-`t.NonNil()`, `Join(a, b)`. Check catches unknown names and fields,
-reads of maybe-nil values without `?.`/`try`, wrong-kind operations,
+`t.NonNil()`, `Join(a, b)`. Check catches unknown names and fields, a
+registered function used as a value instead of called, reads of maybe-nil values without `?.`/`try`, wrong-kind operations,
 builtin calls with the wrong arguments, and comparisons that are never
 true (including against an enum). A nil `*Type` means `Any`.
 

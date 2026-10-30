@@ -264,6 +264,9 @@ func (c *checker) ident(n *ast.Ident, sc *scope) *Type {
 		return orAny(t)
 	}
 	if _, ok := c.p.funcs[name]; ok {
+		// A function used as a value fails wherever Run uses it: a field
+		// read, a comparison, a condition, or the result a host stores.
+		c.report(n, "%q is a function, not a value; call it", name)
 		return Any
 	}
 	names := make([]string, 0, len(c.env))
