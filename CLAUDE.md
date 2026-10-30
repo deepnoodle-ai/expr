@@ -25,6 +25,7 @@ parameter interpolation.
 | `builtin_groups.go` | Opt-in `MathFuncs()` / `StringFuncs()` / `CollectionFuncs()` sets  |
 | `higher_order.go`   | `map`, `filter`, `any`, `all`, `find`, `count`, `try`, `if` forms  |
 | `identifiers.go`    | `Program.Identifiers()` — env-referenced name collection           |
+| `calls.go`          | `Program.Calls()` / `Program.Literal()` — call sites and literals  |
 | `types.go` + `check.go` | `Type` and `Program.Check` / `Template.Check` — static type checking |
 | `template.go`       | `${...}` interpolation via `NewTemplate` / `Render`                |
 | `truthy.go`         | `IsTruthy` rules used by `!`, `&&`, `\|\|`, `bool(v)`              |

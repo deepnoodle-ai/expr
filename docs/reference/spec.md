@@ -1102,6 +1102,36 @@ excluded name may still be read from the env when a host deliberately
 shadows it. Every name that can only resolve through the env is always
 included.
 
+## `Program.Calls()` and `Program.Literal()`
+
+`Program.Calls(names...)` returns each call of the named registered
+functions, in source order, including calls nested in other calls and
+calls in branches that `&&`, `||`, `if` or `try` may skip at run time.
+Each `Call` has the function's `Name`, its `Args` as programs of their
+own, and `Bound`: true when the call sits in the body of an iterating
+form, where it runs once per element. A pipe is desugared first, so
+`x | f("q")` reports `f` with the arguments `x` and `"q"`. Hosts use it
+to find calls they must prepare before a `Run`, for example functions
+whose answers come from outside the program.
+
+An argument program runs and type-checks like any program. Its
+`Source()` is the argument printed back in display form.
+
+`Program.Literal()` returns the value of an expression that is only a
+literal: a string, number, bool or nil, or a list or object of literals.
+Constant arithmetic that compile folds (`-1`, `2 * 3`) counts. Numbers
+come back as `int64` or `float64`, lists as `[]any`, objects as
+`map[string]any`.
+
+```go
+p, _ := expr.Compile(`ask("Is it urgent?", ticket.body) > 0.8`, opts...)
+for _, c := range p.Calls("ask") {
+    q, isLit := c.Args[0].Literal()   // "Is it urgent?", true
+    subject := c.Args[1]              // a *Program for ticket.body
+    _, _, _ = q, isLit, subject
+}
+```
+
 ## Error model
 
 All runtime failures wrap `ErrEvaluate`; all parse failures wrap
