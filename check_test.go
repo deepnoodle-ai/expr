@@ -76,6 +76,8 @@ func TestCheckRejects(t *testing.T) {
 		`map(findings.items, it.titel)`: `no field "titel"`,
 		`findings.items["x"]`:           "list index must be a number",
 		`classify?.missing`:             `no field "missing"`,
+		`first.id`:                      `"first" is a function, not a value; call it`,
+		`[upper, 1]`:                    `"upper" is a function, not a value; call it`,
 	} {
 		_, err := checkSrc(t, src)
 		require.Error(t, err, src)

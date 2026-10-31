@@ -47,6 +47,8 @@ parameter interpolation.
   form accepts at run time, change `check.go` to match (`builtinSigs` for
   builtins), and add the case to `TestCheckMatchesRun`, which runs every
   rejected expression to confirm `Run` fails too.
+  The one intended exception: Check rejects a registered function used as a
+  value (`[upper, 1]`), which `Run` still evaluates.
 - When changing language behavior, update `docs/reference/spec.md` in the same change; if the
   change affects how expressions *look*, update `docs/guides/examples.md` and `llms.txt` too.
 - Guide pages under `docs/guides/` have runnable companions under `examples/` and
