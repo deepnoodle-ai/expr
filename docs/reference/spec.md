@@ -761,6 +761,13 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
 - `==`/`!=` that can never be true: different kinds, or a literal outside
   the other side's enum (`kind == "bugfix"` when kind is
   `"bug_fix" | "feature"`).
+- registered function name used as a value instead of called (`first.id`,
+  `[upper, 1]`). An env entry or bound name with the same name wins.
+
+Check otherwise agrees with Run: what it reports, Run rejects too. A
+function used as a value is the one intended exception. Run returns the
+function itself, which fails on a field read or when a host stores the
+result, but Run accepts it in a condition or a list literal.
 
 `&&` and `||` return one of their operands (see Logical), so they type
 as the join of their operand types: `bool` only when both sides are. Joining
