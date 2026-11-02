@@ -385,6 +385,11 @@ func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 			return
 		}
 	}
+	// Two values that may both be nil can be equal whatever their
+	// non-nil types are.
+	if l.Optional && r.Optional {
+		return
+	}
 	shared := false
 	for _, a := range lk {
 		for _, b := range rk {
@@ -783,7 +788,9 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			}
 			kt := c.check(kv.Key, sc)
 			vt := c.check(kv.Value, sc)
-			if key, ok := literalString(kt); ok {
+			// A later key replaces an earlier one, so a literal key's
+			// field has exactly the value's type.
+			if key, ok := literalString(kt); ok && !kt.Optional {
 				out.Fields[key] = vt
 				continue
 			}
@@ -796,6 +803,15 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 				c.report(kv.Key, "an object key must be a string, not %s", describe(kt))
 			default:
 				c.nilCheck(kv.Key, kt)
+			}
+			// A computed key may replace any field listed so far (only
+			// those in its enum, if it has one), so each such field may
+			// hold either type.
+			for name, ft := range out.Fields {
+				if kt.Kind == KindString && len(kt.Enum) > 0 && !kt.hasEnumValue(name) {
+					continue
+				}
+				out.Fields[name] = Join(orAny(ft), orAny(vt))
 			}
 		}
 		return out
@@ -1020,16 +1036,27 @@ func listType(a []*Type) *Type {
 	return ListOf(Any)
 }
 
-// sliceType is a list for a list or nil, and a string for a string.
+// sliceType is a list for a list or nil, and a string for a string. A
+// union argument gives the union of those results.
 func sliceType(a []*Type) *Type {
 	if len(a) == 0 || a[0].isAny() {
 		return Any
 	}
-	if a[0].Kind == KindString {
-		if a[0].Optional {
-			return Join(String(), ListOf(Any))
+	var out, list *Type
+	for _, v := range variants(a[0]) {
+		switch v.Kind {
+		case KindString:
+			out = Join(out, String())
+		case KindList:
+			list = Join(list, listType([]*Type{v}))
 		}
-		return String()
 	}
-	return listType(a[:1])
+	// nil slices to an empty list, which fits any list element type.
+	if list == nil && (a[0].Optional || a[0].Kind == KindNull) {
+		list = ListOf(Any)
+	}
+	if out = Join(out, list); out == nil {
+		return ListOf(Any)
+	}
+	return out
 }

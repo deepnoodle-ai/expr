@@ -762,10 +762,12 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
   with a typed `Elem`, a field in `Absent` (which Join sets for a field
   only one side has), or an index by a string that is not a literal
   (`scores[name]`), unless read with `?.`/`?[` or inside `try`;
-- object literal key that is not a string or may be nil;
+- object literal key that is not a string or may be nil (a key typed
+  `"x"?` may be nil too);
 - `==`/`!=` that can never be true: different kinds, or a literal outside
   the other side's enum (`kind == "bugfix"` when kind is
-  `"bug_fix" | "feature"`).
+  `"bug_fix" | "feature"`). Two sides that may both be nil can be equal,
+  so they are not reported whatever their non-nil types.
 - registered function name used as a value instead of called (`first.id`,
   `[upper, 1]`). An env entry or bound name with the same name wins.
 
@@ -786,7 +788,11 @@ an open object does not list may be absent, so it is read with `?.`. Joining
 two objects (through `if`, `||`, a list literal or a function typed with
 `Join`) keeps the fields both have, as present; a field only one has is
 in `Absent`, so `if(c, {"x": 1}, {}).x` is reported and
-`if(c, {"x": 1}, {})?.x` types as `1?`.
+`if(c, {"x": 1}, {})?.x` types as `1?`. In an object literal, a key that
+is not a literal may replace any field listed before it, so in
+`{"x": 1, k: "s"}` the field `x` types as `1 | "s"`; a literal key after it
+sets the field's type outright. `slice` of a union of a string and a list
+types as the union of a string and a list.
 `==` and `!=` on lists or objects are reported, since Run rejects them.
 
 `Any` disables checking for the value and everything derived from it, so a
