@@ -779,24 +779,9 @@ func tryIndexValue(recv, idx any) (any, error) {
 		}
 		return string(runes[i]), nil
 	case reflect.Map:
-		keyType := rv.Type().Key()
-		if idx == nil {
-			return nil, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
-		}
-		kv := reflect.ValueOf(idx)
-		if !kv.Type().AssignableTo(keyType) {
-			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
-				converted, err := safeNumericConvert(kv, keyType)
-				if err != nil {
-					return nil, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
-				}
-				kv = converted
-			} else if kv.Type().ConvertibleTo(keyType) {
-				kv = kv.Convert(keyType)
-			} else {
-				return nil, fmt.Errorf("%w: cannot use %T as map key %v",
-					ErrEvaluate, idx, keyType)
-			}
+		kv, err := mapKey(rv.Type().Key(), idx)
+		if err != nil {
+			return nil, err
 		}
 		mv := rv.MapIndex(kv)
 		if !mv.IsValid() {

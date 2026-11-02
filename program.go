@@ -1094,8 +1094,8 @@ func selectField(recv any, name string, fieldTags *structTagConfig) (any, error)
 }
 
 func (p *Program) evalIndex(ctx context.Context, n *ast.IndexExpr, env any, depth int) (any, error) {
-	// Fast path: filter(xs, p)[k] with a small constant k stops at the
-	// (k+1)-th match instead of materializing the full filtered slice.
+	// Fast path: filter(xs, p)[k] with a constant k streams the matches
+	// instead of materializing the full filtered slice.
 	if v, ok, err := p.tryFilterIndex(ctx, n, env, depth); ok {
 		return v, err
 	}
@@ -1249,23 +1249,9 @@ func indexValueRV(rv reflect.Value, idx any) (reflect.Value, error) {
 		}
 		return reflect.ValueOf(string(runes[i])), nil
 	case reflect.Map:
-		keyType := rv.Type().Key()
-		if idx == nil {
-			return reflect.Value{}, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
-		}
-		kv := reflect.ValueOf(idx)
-		if !kv.Type().AssignableTo(keyType) {
-			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
-				converted, err := safeNumericConvert(kv, keyType)
-				if err != nil {
-					return reflect.Value{}, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
-				}
-				kv = converted
-			} else if kv.Type().ConvertibleTo(keyType) {
-				kv = kv.Convert(keyType)
-			} else {
-				return reflect.Value{}, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
-			}
+		kv, err := mapKey(rv.Type().Key(), idx)
+		if err != nil {
+			return reflect.Value{}, err
 		}
 		mv := rv.MapIndex(kv)
 		if !mv.IsValid() {
@@ -1279,9 +1265,9 @@ func indexValueRV(rv reflect.Value, idx any) (reflect.Value, error) {
 // tryFilterIndex recognises `filter(xs, predicate)[N]` where N is a
 // non-negative integer literal and `filter` is the built-in special
 // form (not shadowed by env or funcs). When matched, it iterates xs
-// and stops as soon as the N-th matching element is found, mirroring
-// the result of the general path without allocating the intermediate
-// slice. ok is true when the fast path was taken.
+// and keeps the N-th matching element. The predicate still runs on every
+// element, so errors and side effects match the general path; only the
+// intermediate slice is skipped. ok is true when the fast path was taken.
 func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any, depth int) (any, bool, error) {
 	call, ok := n.X.(*ast.CallExpr)
 	if !ok {
@@ -1334,8 +1320,13 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		return nil, true, fmt.Errorf("%w: filter expects a list as its first argument, got %T",
 			ErrEvaluate, coll)
 	}
+	// The predicate still runs on every element after the match, so the
+	// result and any predicate error (or side effect) are exactly those
+	// of the general path; only the intermediate slice is skipped.
 	scope := &itEnv{parent: env, name: bindName}
 	var seen int64
+	var found bool
+	var result any
 	for i := 0; i < rv.Len(); i++ {
 		item := rv.Index(i).Interface()
 		scope.it = item
@@ -1348,9 +1339,12 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 			continue
 		}
 		if seen == target {
-			return item, true, nil
+			found, result = true, item
 		}
 		seen++
+	}
+	if found {
+		return result, true, nil
 	}
 	return nil, true, fmt.Errorf("%w: index %d out of range", ErrEvaluate, target)
 }
@@ -1393,26 +1387,9 @@ func indexValue(recv, idx any) (any, error) {
 		}
 		return string(runes[i]), nil
 	case reflect.Map:
-		keyType := rv.Type().Key()
-		if idx == nil {
-			// Untyped nil is only a valid key for nilable key kinds; rather
-			// than handling every combination via reflect we reject it
-			// — reflect.ValueOf(nil).Type() would otherwise panic.
-			return nil, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
-		}
-		kv := reflect.ValueOf(idx)
-		if !kv.Type().AssignableTo(keyType) {
-			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
-				converted, err := safeNumericConvert(kv, keyType)
-				if err != nil {
-					return nil, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
-				}
-				kv = converted
-			} else if kv.Type().ConvertibleTo(keyType) {
-				kv = kv.Convert(keyType)
-			} else {
-				return nil, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
-			}
+		kv, err := mapKey(rv.Type().Key(), idx)
+		if err != nil {
+			return nil, err
 		}
 		mv := rv.MapIndex(kv)
 		if !mv.IsValid() {

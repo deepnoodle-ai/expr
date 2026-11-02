@@ -48,6 +48,9 @@ func prepareFunc(name string, fn any) (*preparedFunc, error) {
 		return nil, fmt.Errorf("function %q is nil", name)
 	}
 	if nf, ok := fn.(Func); ok {
+		if nf == nil {
+			return nil, fmt.Errorf("function %q is a nil Func", name)
+		}
 		return &preparedFunc{name: name, native: nf}, nil
 	}
 	fv := reflect.ValueOf(fn)
@@ -95,7 +98,8 @@ func prepareFunc(name string, fn any) (*preparedFunc, error) {
 // metadata.
 func callPrepared(ctx context.Context, pf *preparedFunc, args []any) (any, error) {
 	if pf.native != nil {
-		return pf.native(ctx, args)
+		v, err := pf.native(ctx, args)
+		return v, wrapCallErr(pf.name, err)
 	}
 	return callPreparedReflect(ctx, pf, args)
 }
@@ -149,8 +153,8 @@ func callPreparedReflect(ctx context.Context, pf *preparedFunc, args []any) (any
 		return out[0].Interface(), nil
 	}
 	// (T, error)
-	if !out[1].IsNil() {
-		return nil, out[1].Interface().(error)
+	if err := callResultErr(out[1]); err != nil {
+		return nil, wrapCallErr(pf.name, err)
 	}
 	return out[0].Interface(), nil
 }

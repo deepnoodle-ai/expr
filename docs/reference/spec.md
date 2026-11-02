@@ -207,9 +207,12 @@ accessing a field on a piped result is written
 3. If both sides are any combination of integer or float kinds, they
    convert to `float64` and compare. `int32(7) == int64(7) == float64(7)`
    is `true`.
-4. Otherwise: if both runtime types are comparable, Go's `==` is used.
-   Different types compare as `false` (no error). Uncomparable types
-   return `ErrEvaluate`.
+4. Otherwise: if both values are comparable, Go's `==` is used.
+   Different types compare as `false` (no error). Uncomparable values
+   return `ErrEvaluate` — including a struct or array whose type is
+   comparable but which holds a slice, map or func in an interface
+   field (Go's `==` would panic on it). `contains` skips elements it
+   cannot compare.
 
 `!=` is exactly `!(==)`.
 
@@ -308,7 +311,9 @@ internal use. This applies to field names as well.
 
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
 - Other maps: `i` is converted to the map's key type if assignable or
-  convertible. A nil index on a typed map is an error (not a panic).
+  convertible. A nil index on a typed map is an error (not a panic), as
+  is a key that cannot be hashed (`m[[1]]` on a `map[any]any`) or a
+  slice too short to convert to an array key type.
 - Slice, array: `i` must be an integer or an integer-valued float
   (`xs[1.0]` works, `xs[1.5]` is an error). Negative indices and
   indices `>= len(x)` return `ErrEvaluate` (expr does not support
@@ -431,7 +436,7 @@ The standard set is:
 ### Registration validation
 
 `WithFunctions` entries are validated when `Compile` applies its
-options. A nil entry, a value that is not a Go function, or a function
+options. A nil entry (including a nil `Func`), a value that is not a Go function, or a function
 with an unsupported signature (more than two return values, or a
 second return that is not `error`) fails `Compile` with `ErrCompile` —
 the mistake surfaces at load time rather than on the expression's
@@ -480,7 +485,7 @@ p, err := expr.Compile(src,
 | ----------------- | ------------------------------- | ----- |
 | `first(xs)`       | `(list) -> any, error`          | First element; `nil` for nil or empty lists. |
 | `last(xs)`        | `(list) -> any, error`          | Last element; `nil` for nil or empty lists. |
-| `sum(xs)`         | `(list) -> num, error`          | Numeric sum. `int64` (overflow-checked) when every element is integral, `float64` otherwise. Nil/empty → `0`. |
+| `sum(xs)`         | `(list) -> num, error`          | Numeric sum. `int64` (overflow-checked) when every element is integral, `float64` otherwise (in any element order, without integer overflow). Nil/empty → `0`. |
 | `slice(xs, i, j)` | `(list\|string, int, int) -> list\|string, error` | Half-open range `[i, j)`. Lists yield `[]any`; strings slice by rune. Negative indices count from the end; out-of-range bounds clamp; `i > j` → empty. Covers the rejected `xs[i:j]` syntax. |
 | `sort(xs)`        | `(list) -> []any, error`        | Ascending stable sort. All elements must be numbers (any int/float mix, compared numerically) or all strings (lexicographic). Elements are not converted: ints stay ints. Nil/empty → `[]any{}`. Mixed or non-comparable types → error. Never mutates the input. |
 | `reverse(xs)`     | `(list) -> []any, error`        | Reversed copy. Never mutates the input. Nil/empty → `[]any{}`. |
@@ -1148,6 +1153,8 @@ for _, c := range p.Calls("ask") {
 
 All runtime failures wrap `ErrEvaluate`; all parse failures wrap
 `ErrCompile`. Callers check with `errors.Is(err, ErrEvaluate)` /
-`errors.Is(err, ErrCompile)`. User function errors returned from
-`(T, error)` signatures are wrapped such that both `errors.Is` and
-`errors.As` still find the original cause.
+`errors.Is(err, ErrCompile)`. Errors returned by host functions — the
+error of a `(T, error)` signature, including a non-pointer error value,
+and the error of a `Func` — are wrapped such that both `errors.Is` and
+`errors.As` still find the original cause. An error that already wraps
+`ErrEvaluate`, or a context cancellation error, is returned as is.

@@ -2,6 +2,7 @@ package expr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -23,7 +24,11 @@ var (
 // and is not counted against the caller-supplied argument list.
 func callFunction(ctx context.Context, name string, fn any, args []any) (any, error) {
 	if nf, ok := fn.(Func); ok {
-		return nf(ctx, args)
+		if nf == nil {
+			return nil, fmt.Errorf("%w: %q is a nil function value", ErrEvaluate, name)
+		}
+		v, err := nf(ctx, args)
+		return v, wrapCallErr(name, err)
 	}
 	fv := reflect.ValueOf(fn)
 	if fv.Kind() != reflect.Func {
@@ -98,12 +103,40 @@ func finishCall(name string, ft reflect.Type, out []reflect.Value) (any, error) 
 		if !ft.Out(1).Implements(errValType) {
 			return nil, fmt.Errorf("%w: %q: second return must be error, got %v", ErrEvaluate, name, ft.Out(1))
 		}
-		if !out[1].IsNil() {
-			return nil, out[1].Interface().(error)
+		if err := callResultErr(out[1]); err != nil {
+			return nil, wrapCallErr(name, err)
 		}
 		return out[0].Interface(), nil
 	}
 	return nil, fmt.Errorf("%w: %q returns %d values (expected 0, 1, or (T, error))", ErrEvaluate, name, ft.NumOut())
+}
+
+// callResultErr extracts the error a function returned in v, whose type
+// implements error. A nil interface or nil pointer-like value is no
+// error; a value of a non-nilable kind (a struct implementing error) is
+// always one, as it is in Go once boxed in an error interface.
+func callResultErr(v reflect.Value) error {
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		if v.IsNil() {
+			return nil
+		}
+	}
+	err, _ := v.Interface().(error)
+	return err
+}
+
+// wrapCallErr wraps an error returned by a host function in ErrEvaluate,
+// keeping the original cause reachable through errors.Is / errors.As.
+// Errors that already wrap ErrEvaluate (builtins, nested Runs) pass
+// through unchanged, as do context cancellation errors, which try must
+// not swallow.
+func wrapCallErr(name string, err error) error {
+	if err == nil || errors.Is(err, ErrEvaluate) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: %q: %w", ErrEvaluate, name, err)
 }
 
 func buildCallArgs(ctx context.Context, name string, ft reflect.Type, args []any) ([]reflect.Value, error) {
@@ -188,10 +221,63 @@ func convertArg(name string, idx int, value any, want reflect.Type) (reflect.Val
 	if want.Kind() == reflect.Interface && rv.Type().Implements(want) {
 		return rv, nil
 	}
-	if rv.Type().ConvertibleTo(want) {
-		return rv.Convert(want), nil
+	if converted, ok := convertValue(rv, want); ok {
+		return converted, nil
 	}
 	return reflect.Value{}, fmt.Errorf("%w: %q arg %d: cannot use %T as %v", ErrEvaluate, name, idx, value, want)
+}
+
+// convertValue converts rv to want when Go allows it for this value.
+// reflect.Type.ConvertibleTo only checks types: converting a slice to an
+// array (or array pointer) also needs the slice to be long enough, and
+// reflect panics otherwise.
+func convertValue(rv reflect.Value, want reflect.Type) (reflect.Value, bool) {
+	if !rv.Type().ConvertibleTo(want) {
+		return reflect.Value{}, false
+	}
+	if rv.Kind() == reflect.Slice {
+		switch {
+		case want.Kind() == reflect.Array:
+			if rv.Len() < want.Len() {
+				return reflect.Value{}, false
+			}
+		case want.Kind() == reflect.Pointer && want.Elem().Kind() == reflect.Array:
+			if rv.Len() < want.Elem().Len() {
+				return reflect.Value{}, false
+			}
+		}
+	}
+	return rv.Convert(want), true
+}
+
+// mapKey converts idx to a key usable with a map of keyType. Beyond the
+// type conversion, the key must be hashable at run time: an interface
+// key type accepts any dynamic value, and hashing a slice (or a struct
+// or array holding one) panics.
+func mapKey(keyType reflect.Type, idx any) (reflect.Value, error) {
+	if idx == nil {
+		// Untyped nil is only a valid key for nilable key kinds; rather
+		// than handling every combination via reflect we reject it.
+		return reflect.Value{}, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
+	}
+	kv := reflect.ValueOf(idx)
+	if !kv.Type().AssignableTo(keyType) {
+		if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
+			converted, err := safeNumericConvert(kv, keyType)
+			if err != nil {
+				return reflect.Value{}, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
+			}
+			kv = converted
+		} else if converted, ok := convertValue(kv, keyType); ok {
+			kv = converted
+		} else {
+			return reflect.Value{}, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
+		}
+	}
+	if !kv.Comparable() {
+		return reflect.Value{}, fmt.Errorf("%w: cannot use unhashable %T as map key", ErrEvaluate, idx)
+	}
+	return kv, nil
 }
 
 func isNumericKind(k reflect.Kind) bool {
@@ -506,15 +592,14 @@ func looseEqual(lhs, rhs any) (bool, bool) {
 			return lb == rb, true
 		}
 	}
-	lt := reflect.TypeOf(lhs)
-	if !lt.Comparable() {
+	// Value.Comparable, unlike Type.Comparable, also looks inside
+	// interface fields and elements: a struct or array holding a slice
+	// has a comparable type but panics when compared.
+	lv, rv := reflect.ValueOf(lhs), reflect.ValueOf(rhs)
+	if !lv.Comparable() || !rv.Comparable() {
 		return false, false
 	}
-	rt := reflect.TypeOf(rhs)
-	if !rt.Comparable() {
-		return false, false
-	}
-	if lt != rt {
+	if lv.Type() != rv.Type() {
 		return false, true
 	}
 	return lhs == rhs, true

@@ -314,32 +314,38 @@ func nativeSum(_ context.Context, args []any) (any, error) {
 	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
 		return nil, fmt.Errorf("%w: sum: expected list, got %T", ErrEvaluate, args[0])
 	}
+	// Integers accumulate exactly; floats separately. A list with any
+	// float sums to a float, so an integer overflow is only an error
+	// when every element is an integer — otherwise the overflowing
+	// partial sum moves into the float accumulator, whatever the order
+	// of the elements.
 	var intSum int64
 	var floatSum float64
-	floating := false
+	floating, overflowed := false, false
 	for i := 0; i < rv.Len(); i++ {
 		elem := rv.Index(i).Interface()
-		if !floating {
-			if v, ok := toInt64(elem); ok {
-				next, ok := checkedAddInt64(intSum, v)
-				if !ok {
-					return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
-				}
-				intSum = next
-				continue
+		if v, ok := toInt64(elem); ok {
+			next, ok := checkedAddInt64(intSum, v)
+			if !ok {
+				overflowed = true
+				floatSum += float64(intSum)
+				next = v
 			}
-			// First non-integral element: switch to float accumulation.
-			floating = true
-			floatSum = float64(intSum)
+			intSum = next
+			continue
 		}
 		v, ok := toFloat64(elem)
 		if !ok {
 			return nil, fmt.Errorf("%w: sum: element %d is %T, not a number", ErrEvaluate, i, elem)
 		}
+		floating = true
 		floatSum += v
 	}
 	if floating {
-		return floatSum, nil
+		return floatSum + float64(intSum), nil
+	}
+	if overflowed {
+		return nil, fmt.Errorf("%w: integer overflow", ErrEvaluate)
 	}
 	return intSum, nil
 }
