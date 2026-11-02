@@ -257,8 +257,46 @@ func isSliceTypeFollow(toks []tokenInfo, i int) bool {
 	switch toks[i].kind {
 	case token.IDENT, token.LBRACK,
 		token.MAP, token.INTERFACE, token.STRUCT,
-		token.CHAN, token.FUNC, token.MUL, token.ARROW:
+		token.CHAN, token.FUNC, token.ARROW:
 		return true
+	case token.MUL:
+		return isPointerTypeFollow(toks, i, nil)
+	}
+	return false
+}
+
+// isPointerTypeFollow reports whether the '*' at toks[i] starts a pointer
+// element type ([]*T{...}, [N]*T{...}) rather than a multiplication
+// ([6][0] * 2, [] * n). After a value, '*' multiplies, so it is a type
+// only when no operand can follow it — a type keyword or another '*' —
+// or when a named type is followed by the literal's '{'. matches is nil
+// for the "[]" prefix, whose following '[' is already a type.
+func isPointerTypeFollow(toks []tokenInfo, i int, matches map[int]int) bool {
+	j := i + 1
+	if j >= len(toks) {
+		return false
+	}
+	switch toks[j].kind {
+	case token.MAP, token.INTERFACE, token.STRUCT, token.CHAN, token.FUNC, token.ARROW:
+		return true
+	case token.MUL:
+		return isPointerTypeFollow(toks, j, matches)
+	case token.LBRACK:
+		if matches == nil {
+			return isSliceTypeFollow(toks, j)
+		}
+		if j+1 < len(toks) && toks[j+1].kind == token.RBRACK {
+			return isSliceTypeFollow(toks, j+2)
+		}
+		close, ok := matches[j]
+		return ok && isArrayTypeFollow(toks, close+1, matches)
+	case token.IDENT:
+		// T{ or pkg.T{
+		k := j + 1
+		if k+1 < len(toks) && toks[k].kind == token.PERIOD && toks[k+1].kind == token.IDENT {
+			k += 2
+		}
+		return k < len(toks) && toks[k].kind == token.LBRACE
 	}
 	return false
 }
@@ -276,8 +314,10 @@ func isArrayTypeFollow(toks []tokenInfo, i int, matches map[int]int) bool {
 	switch toks[i].kind {
 	case token.IDENT,
 		token.MAP, token.INTERFACE, token.STRUCT,
-		token.CHAN, token.FUNC, token.MUL, token.ARROW:
+		token.CHAN, token.FUNC, token.ARROW:
 		return true
+	case token.MUL:
+		return isPointerTypeFollow(toks, i, matches)
 	case token.LBRACK:
 		// "[N][...]": classify the outer "[N]" as an array type only
 		// when the inner bracket pair is itself a type prefix.

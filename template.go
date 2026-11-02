@@ -473,7 +473,7 @@ func templateLineCol(raw string, offset int) (line, col int) {
 // reported as an error rather than silently splitting the closer.
 //
 // hadContent reports whether the scanner saw at least one token inside
-// the body that wasn't a brace or auto-inserted semicolon, so that
+// the body other than the closing braces or an auto-inserted semicolon, so that
 // comment-only bodies like `${/* hi */}` are rejected up front with
 // the same "empty expression" error as `${}`.
 //
@@ -498,7 +498,10 @@ func scanTemplateExprEnd(src string, start, openOffset int, open, close string, 
 			return 0, false, fmt.Errorf("template: unclosed `%s` at %d:%d (offset %d, missing `%s`)",
 				open, line, col, openOffset, close)
 		case token.LBRACE:
+			// The opener's own braces are not scanned, so every `{`
+			// here belongs to the body (an object literal like `${{}}`).
 			depth++
+			hadContent = true
 		case token.RBRACE:
 			depth--
 			if depth == 0 {

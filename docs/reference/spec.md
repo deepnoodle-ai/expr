@@ -711,8 +711,9 @@ The semantics:
 
 The receiver can be any primary expression: an identifier, a selector
 or index chain, a call (including `map(...)` and `if(...)`), a
-parenthesized group, or an array/object literal (`[1, 2]?[0]`,
-`{"a": 1}?.a`). `?.map` and `?.if` work the same way `.map` and
+parenthesized group, an array/object literal (`[1, 2]?[0]`,
+`{"a": 1}?.a`), or a typed literal (`[]any{1}?[0]`,
+`map[string]any{}?.a`). `?.map` and `?.if` work the same way `.map` and
 `.if` do. Calling the result of an optional access (`a?.b()`) is not
 supported and is rejected at Compile time.
 
