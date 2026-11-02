@@ -128,14 +128,12 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 		return n
 	case *ast.UnaryExpr:
 		n.X = p.prewalk(n.X)
-		if p.noOptimize {
-			return n
-		}
 		// `-9223372036854775808` (MinInt64) is special: the bare
 		// literal overflows int64 on its own, so it never reaches
-		// litCache and the generic fold below can't see it. Parse the
-		// negation as a single signed literal instead, matching how
-		// users read it.
+		// litCache. Parse the negation as a single signed literal
+		// instead, matching how users read it. This is part of the
+		// language, not an optimization, so it runs even when folding
+		// is off.
 		if n.Op == token.SUB {
 			if lit, ok := n.X.(*ast.BasicLit); ok && lit.Kind == token.INT {
 				if _, cached := p.litCache[lit]; !cached {
@@ -146,6 +144,9 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 					}
 				}
 			}
+		}
+		if p.noOptimize {
+			return n
 		}
 		if xv, ok := p.constValue(n.X); ok {
 			if v, err := applyUnary(n.Op, xv); err == nil {
@@ -725,9 +726,9 @@ func applyBinaryGeneral(op token.Token, lhs, rhs any) (any, error) {
 func applyInt64Binary(op token.Token, l, r int64) (any, error, bool) {
 	switch op {
 	case token.EQL:
-		return float64(l) == float64(r), nil, true
+		return l == r, nil, true
 	case token.NEQ:
-		return float64(l) != float64(r), nil, true
+		return l != r, nil, true
 	case token.ADD:
 		if v, ok := checkedAddInt64(l, r); ok {
 			return v, nil, true
@@ -1090,7 +1091,8 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		return nil, true, err
 	}
 	if coll == nil {
-		return nil, true, fmt.Errorf("%w: index %d out of range", ErrEvaluate, target)
+		// filter(nil, p) is an empty list.
+		return nil, true, fmt.Errorf("%w: index %d out of range [0, 0)", ErrEvaluate, target)
 	}
 	rv := reflect.ValueOf(coll)
 	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
@@ -1123,7 +1125,8 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 	if found {
 		return result, true, nil
 	}
-	return nil, true, fmt.Errorf("%w: index %d out of range", ErrEvaluate, target)
+	// seen is the length the filtered list would have had.
+	return nil, true, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, target, seen)
 }
 
 func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
