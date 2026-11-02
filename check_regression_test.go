@@ -169,7 +169,7 @@ func TestCheckRegressionSoundness(t *testing.T) {
 			}
 			require.NoError(t, checkErr)
 			require.Equal(t, tc.want, typ.String())
-			_ = got
+			require.True(t, fits(got, typ), "Run returned a value outside the inferred type")
 		})
 	}
 }
