@@ -75,17 +75,24 @@ func formatValue(b *strings.Builder, rv reflect.Value, seen map[visit]bool) {
 		}
 		defer delete(seen, v)
 		b.WriteString("map[")
+		// Format each key once, with this map already marked as seen: a
+		// key that leads back to the map renders <cycle> instead of
+		// recursing, and the sort compares the rendered strings.
 		keys := rv.MapKeys()
-		sort.Slice(keys, func(i, j int) bool {
-			return safeFormatValue(keys[i].Interface()) < safeFormatValue(keys[j].Interface())
-		})
+		entries := make([]mapEntry, len(keys))
 		for i, k := range keys {
+			var kb strings.Builder
+			formatValue(&kb, k, seen)
+			entries[i] = mapEntry{key: kb.String(), value: rv.MapIndex(k)}
+		}
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+		for i, e := range entries {
 			if i > 0 {
 				b.WriteByte(' ')
 			}
-			formatValue(b, k, seen)
+			b.WriteString(e.key)
 			b.WriteByte(':')
-			formatValue(b, rv.MapIndex(k), seen)
+			formatValue(b, e.value, seen)
 		}
 		b.WriteByte(']')
 	case reflect.Slice:
@@ -125,6 +132,11 @@ func formatValue(b *strings.Builder, rv reflect.Value, seen map[visit]bool) {
 		}
 		b.WriteString("<unexported>")
 	}
+}
+
+type mapEntry struct {
+	key   string
+	value reflect.Value
 }
 
 func formatList(b *strings.Builder, rv reflect.Value, seen map[visit]bool) {
