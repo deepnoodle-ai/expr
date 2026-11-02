@@ -26,9 +26,10 @@
 package optaccess
 
 import (
-	"go/scanner"
 	"go/token"
 	"strings"
+
+	"github.com/deepnoodle-ai/expr/internal/srcedit"
 )
 
 // Rewrite returns src with `?.field` and `?[idx]` rewritten to calls
@@ -43,174 +44,120 @@ import (
 // spliced in a single forward pass, keeping compile time linear in the
 // length of a chain.
 func Rewrite(src string) string {
+	out, _ := RewriteMap(src)
+	return out
+}
+
+// RewriteMap is Rewrite that also returns the map from offsets in the
+// result back to offsets in src.
+func RewriteMap(src string) (string, srcedit.Map) {
 	if !strings.Contains(src, "?") {
-		return src
+		return src, srcedit.Map{}
 	}
-	toks := scanTokens(src)
+	toks := srcedit.Scan(src)
 	if len(toks) == 0 {
-		return src
+		return src, srcedit.Map{}
 	}
-	closes := matchBracketsForward(toks)
+	closes := srcedit.Brackets(toks)
+	// opens[c] is the index of the bracket that c closes, or -1.
+	scratch := make([]int, 2*len(toks))
+	opens, lhsOf := scratch[:len(toks)], scratch[len(toks):]
+	for i := range scratch {
+		scratch[i] = -1
+	}
+	for i, c := range closes {
+		if c >= 0 {
+			opens[c] = i
+		}
+	}
 	// lhsOf[e] is the LHS start of the rewrite whose last token is e
 	// (the field of `?.f`, the `]` of `?[i]`), or -1.
-	lhsOf := make([]int, len(toks))
-	for i := range lhsOf {
-		lhsOf[i] = -1
-	}
 	// prefixes[i] are the calls that open before token i, innermost
-	// first; repl[i] replaces tokens i..repl[i].last with repl[i].str.
-	type replacement struct {
+	// first; tails[i] replaces tokens i..tails[i].last. Both are indexed
+	// by token, and read back in token order so the edits come out in
+	// source order.
+	type tail struct {
 		str  string
 		last int
 	}
 	prefixes := make(map[int][]string)
-	repl := make(map[int]replacement)
+	tails := make(map[int]tail)
+	found := false
 	for i := 0; i < len(toks); i++ {
 		if !isQuestion(src, toks[i]) || i+1 >= len(toks) {
 			continue
 		}
-		switch toks[i+1].kind {
+		switch toks[i+1].Kind {
 		case token.PERIOD:
-			if i+2 >= len(toks) || !isFieldToken(toks[i+2].kind) {
+			if i+2 >= len(toks) || !isFieldToken(toks[i+2].Kind) {
 				continue
 			}
-			lhs := lhsStartIdx(toks, src, i, lhsOf)
+			lhs := lhsStartIdx(toks, src, i, lhsOf, opens)
 			if lhs < 0 || lhs >= i {
 				continue
 			}
-			field := toks[i+2].lit
+			field := toks[i+2].Lit
 			if field == "" {
-				field = src[toks[i+2].pos:toks[i+2].end]
+				field = src[toks[i+2].Pos:toks[i+2].End]
 			}
 			lhsOf[i+2] = lhs
 			prefixes[lhs] = append(prefixes[lhs], "__try_select__(")
-			repl[i] = replacement{str: ", " + quoteString(field) + ")", last: i + 2}
+			tails[i] = tail{str: ", " + quoteString(field) + ")", last: i + 2}
+			found = true
 			i += 2
 		case token.LBRACK:
 			closeIdx := closes[i+1]
 			if closeIdx < 0 {
 				continue
 			}
-			lhs := lhsStartIdx(toks, src, i, lhsOf)
+			lhs := lhsStartIdx(toks, src, i, lhsOf, opens)
 			if lhs < 0 || lhs >= i {
 				continue
 			}
 			lhsOf[closeIdx] = lhs
 			prefixes[lhs] = append(prefixes[lhs], "__try_index__(")
-			repl[i] = replacement{str: ", ", last: i + 1}
-			repl[closeIdx] = replacement{str: ")", last: closeIdx}
+			tails[i] = tail{str: ", ", last: i + 1}
+			tails[closeIdx] = tail{str: ")", last: closeIdx}
+			found = true
 			// The index expression may hold optional access of its own;
 			// the loop continues into it.
 			i++
 		}
 	}
-	if len(repl) == 0 {
-		return src
+	if !found {
+		return src, srcedit.Map{}
 	}
-
-	var b strings.Builder
-	b.Grow(len(src) + 20*len(repl))
-	last := 0
-	for i := 0; i < len(toks); i++ {
-		if ps, ok := prefixes[i]; ok {
-			b.WriteString(src[last:toks[i].pos])
+	var edits []srcedit.Edit
+	for i, t := range toks {
+		if ps := prefixes[i]; len(ps) > 0 {
+			var b strings.Builder
 			// Keep the call name from fusing with a preceding word in
 			// malformed input such as `A.0?.b`.
-			if p := toks[i].pos; p > 0 && isWordByte(src[p-1]) {
+			if t.Pos > 0 && isWordByte(src[t.Pos-1]) {
 				b.WriteByte(' ')
 			}
 			// A later operator wraps an earlier one: outermost first.
 			for k := len(ps) - 1; k >= 0; k-- {
 				b.WriteString(ps[k])
 			}
-			last = toks[i].pos
+			edits = append(edits, srcedit.Edit{Pos: t.Pos, End: t.Pos, Str: b.String()})
 		}
-		if r, ok := repl[i]; ok {
-			b.WriteString(src[last:toks[i].pos])
-			b.WriteString(r.str)
-			last = toks[r.last].end
-			i = r.last
+		if tl, ok := tails[i]; ok {
+			edits = append(edits, srcedit.Edit{Pos: t.Pos, End: toks[tl.last].End, Str: tl.str})
 		}
 	}
-	b.WriteString(src[last:])
-	return b.String()
+	return srcedit.Apply(src, edits)
 }
 
 func isWordByte(c byte) bool {
 	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || c >= 0x80
 }
 
-// matchBracketsForward returns, for each `[` token index, the index of
-// its matching `]`, and -1 for every other token or an unclosed `[`.
-func matchBracketsForward(toks []tokenInfo) []int {
-	out := make([]int, len(toks))
-	var stack []int
-	for i, t := range toks {
-		out[i] = -1
-		switch t.kind {
-		case token.LBRACK:
-			stack = append(stack, i)
-		case token.RBRACK:
-			if n := len(stack); n > 0 {
-				out[stack[n-1]] = i
-				stack = stack[:n-1]
-			}
-		}
-	}
-	return out
-}
-
-// tokenInfo records one scanned token's byte range and kind. lit is
-// retained for IDENT tokens so we can splice the field name into the
-// rewrite without re-reading the source.
-type tokenInfo struct {
-	pos  int
-	end  int
-	kind token.Token
-	lit  string
-}
-
-// scanTokens runs go/scanner over src and returns every significant
-// token. Comments and auto-inserted semicolons are filtered so
-// "previous token" tracking sees only meaningful tokens.
-func scanTokens(src string) []tokenInfo {
-	fs := token.NewFileSet()
-	file := fs.AddFile("", fs.Base(), len(src))
-	var s scanner.Scanner
-	s.Init(file, []byte(src), nil, scanner.ScanComments)
-
-	var out []tokenInfo
-	for {
-		pos, t, lit := s.Scan()
-		if t == token.EOF {
-			break
-		}
-		if t == token.COMMENT || t == token.SEMICOLON {
-			continue
-		}
-		off := file.Offset(pos)
-		out = append(out, tokenInfo{
-			pos:  off,
-			end:  off + tokLen(t, lit),
-			kind: t,
-			lit:  lit,
-		})
-	}
-	return out
-}
-
-func tokLen(t token.Token, lit string) int {
-	if lit != "" {
-		return len(lit)
-	}
-	return len(t.String())
-}
-
 // isQuestion reports whether t is a single `?` byte. The scanner
 // flags `?` as ILLEGAL but other bytes (e.g. `@`, `#`) end up there
 // too, so the byte check is needed to avoid rewriting around them.
-func isQuestion(src string, t tokenInfo) bool {
-	return t.kind == token.ILLEGAL && t.end-t.pos == 1 && src[t.pos] == '?'
+func isQuestion(src string, t srcedit.Token) bool {
+	return t.Kind == token.ILLEGAL && t.End-t.Pos == 1 && src[t.Pos] == '?'
 }
 
 // isFieldToken reports whether t can be the field name after `?.`.
@@ -231,11 +178,13 @@ func isFieldToken(t token.Token) bool {
 // without ever closing — that is, when the source is unbalanced or
 // the `?` has nothing to the left of it.
 //
+// opens maps each closing bracket to its opener (-1 if unpaired).
+//
 // lhsOf maps the last token of each earlier rewrite to its LHS start.
 // That rewrite becomes one call, a complete primary, so a walk reaching
 // its last token ends at its start — which also keeps `a?.type?.b`,
 // whose keyword field the walk could not step over, working.
-func lhsStartIdx(toks []tokenInfo, src string, qIdx int, lhsOf []int) int {
+func lhsStartIdx(toks []srcedit.Token, src string, qIdx int, lhsOf, opens []int) int {
 	if qIdx == 0 {
 		return -1
 	}
@@ -245,18 +194,18 @@ func lhsStartIdx(toks []tokenInfo, src string, qIdx int, lhsOf []int) int {
 			return lhsOf[i]
 		}
 		t := toks[i]
-		switch t.kind {
+		switch t.Kind {
 		case token.IDENT, token.INT, token.FLOAT, token.STRING, token.CHAR,
 			token.MAP, token.IF:
 			// `map` and `if` walk like identifiers: expr accepts them
 			// as ordinary names in selector chains (`a.map?.x`).
-			if i-1 >= 0 && toks[i-1].kind == token.PERIOD {
+			if i-1 >= 0 && toks[i-1].Kind == token.PERIOD {
 				i -= 2
 				continue
 			}
 			return i
 		case token.RBRACK:
-			j := matchBracketBack(toks, i)
+			j := opens[i]
 			if j < 0 {
 				return -1
 			}
@@ -272,29 +221,29 @@ func lhsStartIdx(toks []tokenInfo, src string, qIdx int, lhsOf []int) int {
 			// or a typed composite literal (`[]any{...}?[0]`) whose
 			// type the walk steps back over. Other typed forms decline
 			// and leave the parser to report the stray `?`.
-			j := matchBraceBack(toks, i)
+			j := opens[i]
 			if j < 0 {
 				return -1
 			}
 			if j == 0 {
 				return 0
 			}
-			if startsTypedComposite(toks[j-1].kind) {
-				return compositeTypeStart(toks, j)
+			if startsTypedComposite(toks[j-1].Kind) {
+				return compositeTypeStart(toks, j, opens)
 			}
 			return j
 		case token.RPAREN:
-			j := matchParenBack(toks, i)
+			j := opens[i]
 			if j < 0 {
 				return -1
 			}
 			prev := j - 1
-			if prev >= 0 && toks[prev].kind == token.PERIOD {
+			if prev >= 0 && toks[prev].Kind == token.PERIOD {
 				// A type assertion `x.(T)`, which expr rejects; splicing
 				// inside it would only garble the parser's error.
 				return -1
 			}
-			if prev >= 0 && extendsPrimary(toks[prev].kind) {
+			if prev >= 0 && extendsPrimary(toks[prev].Kind) {
 				i = prev
 				continue
 			}
@@ -316,60 +265,6 @@ func lhsStartIdx(toks []tokenInfo, src string, qIdx int, lhsOf []int) int {
 	return -1
 }
 
-// matchBracketBack returns the index of the `[` that opens the `]`
-// at rbrack. Negative on imbalance.
-func matchBracketBack(toks []tokenInfo, rbrack int) int {
-	depth := 1
-	for j := rbrack - 1; j >= 0; j-- {
-		switch toks[j].kind {
-		case token.RBRACK:
-			depth++
-		case token.LBRACK:
-			depth--
-			if depth == 0 {
-				return j
-			}
-		}
-	}
-	return -1
-}
-
-// matchParenBack returns the index of the `(` that opens the `)`
-// at rparen. Negative on imbalance.
-func matchParenBack(toks []tokenInfo, rparen int) int {
-	depth := 1
-	for j := rparen - 1; j >= 0; j-- {
-		switch toks[j].kind {
-		case token.RPAREN:
-			depth++
-		case token.LPAREN:
-			depth--
-			if depth == 0 {
-				return j
-			}
-		}
-	}
-	return -1
-}
-
-// matchBraceBack returns the index of the `{` that opens the `}`
-// at rbrace. Negative on imbalance.
-func matchBraceBack(toks []tokenInfo, rbrace int) int {
-	depth := 1
-	for j := rbrace - 1; j >= 0; j-- {
-		switch toks[j].kind {
-		case token.RBRACE:
-			depth++
-		case token.LBRACE:
-			depth--
-			if depth == 0 {
-				return j
-			}
-		}
-	}
-	return -1
-}
-
 // startsTypedComposite reports whether a `{` directly preceded by t
 // belongs to a typed composite literal (`[]any{...}`, `T{...}`,
 // `map[string]any{...}`) rather than a bare object literal.
@@ -387,16 +282,16 @@ func startsTypedComposite(t token.Token) bool {
 // that type is not a slice, array or map type. The element (or value)
 // type is a single name (`any`, `T`, `pkg.T`) or `interface{}`; anything
 // fancier is not a literal expr accepts, so declining it costs nothing.
-func compositeTypeStart(toks []tokenInfo, lbrace int) int {
+func compositeTypeStart(toks []srcedit.Token, lbrace int, opens []int) int {
 	elem := typeNameStart(toks, lbrace-1)
-	if elem < 1 || toks[elem-1].kind != token.RBRACK {
+	if elem < 1 || toks[elem-1].Kind != token.RBRACK {
 		return -1
 	}
-	open := matchBracketBack(toks, elem-1)
+	open := opens[elem-1]
 	if open < 0 {
 		return -1
 	}
-	if open > 0 && toks[open-1].kind == token.MAP {
+	if open > 0 && toks[open-1].Kind == token.MAP {
 		// map[K]V: K is a single name too.
 		if typeNameStart(toks, elem-2) != open+1 {
 			return -1
@@ -408,18 +303,18 @@ func compositeTypeStart(toks []tokenInfo, lbrace int) int {
 
 // typeNameStart returns the index of the first token of a type name that
 // ends at toks[end]: `T`, `pkg.T` or `interface{}`; -1 otherwise.
-func typeNameStart(toks []tokenInfo, end int) int {
+func typeNameStart(toks []srcedit.Token, end int) int {
 	if end < 0 {
 		return -1
 	}
-	switch toks[end].kind {
+	switch toks[end].Kind {
 	case token.IDENT:
-		if end >= 2 && toks[end-1].kind == token.PERIOD && toks[end-2].kind == token.IDENT {
+		if end >= 2 && toks[end-1].Kind == token.PERIOD && toks[end-2].Kind == token.IDENT {
 			return end - 2
 		}
 		return end
 	case token.RBRACE:
-		if end >= 2 && toks[end-1].kind == token.LBRACE && toks[end-2].kind == token.INTERFACE {
+		if end >= 2 && toks[end-1].Kind == token.LBRACE && toks[end-2].Kind == token.INTERFACE {
 			return end - 2
 		}
 	}
