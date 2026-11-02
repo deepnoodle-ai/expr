@@ -42,6 +42,10 @@ type Program struct {
 	// counter so concurrent Runs never share budget state.
 	evalBudget int
 	budgetLeft *int64
+
+	// noOptimize disables folding and fast paths (see
+	// withoutOptimizations).
+	noOptimize bool
 }
 
 // compile walks the root AST once to populate the lookup caches used
@@ -118,12 +122,15 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 	case *ast.ParenExpr:
 		n.X = p.prewalk(n.X)
 		// Unwrap parens around constants so constValue sees them.
-		if _, ok := p.constValue(n.X); ok {
+		if _, ok := p.constValue(n.X); ok && !p.noOptimize {
 			return n.X
 		}
 		return n
 	case *ast.UnaryExpr:
 		n.X = p.prewalk(n.X)
+		if p.noOptimize {
+			return n
+		}
 		// `-9223372036854775808` (MinInt64) is special: the bare
 		// literal overflows int64 on its own, so it never reaches
 		// litCache and the generic fold below can't see it. Parse the
@@ -157,7 +164,7 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 		// isn't worth a second code path. Skip == and != too: they
 		// never fail, so folding `"a" == 1` to false would hide a
 		// comparison that is never true from Check.
-		if n.Op != token.LAND && n.Op != token.LOR && n.Op != token.EQL && n.Op != token.NEQ {
+		if !p.noOptimize && n.Op != token.LAND && n.Op != token.LOR && n.Op != token.EQL && n.Op != token.NEQ {
 			if xv, ok := p.constValue(n.X); ok {
 				if yv, ok2 := p.constValue(n.Y); ok2 {
 					if v, err := applyBinary(n.Op, xv, yv); err == nil {
@@ -183,7 +190,7 @@ func (p *Program) prewalk(node ast.Expr) ast.Expr {
 		// Keyword sentinels (`__expr_if__`, etc.) are translated back
 		// to their user-visible names so the prepared lookup keys on
 		// what the user actually wrote.
-		if ident, ok := n.Fun.(*ast.Ident); ok {
+		if ident, ok := n.Fun.(*ast.Ident); ok && !p.noOptimize {
 			if _, isForm := higherOrderForms[ident.Name]; !isForm {
 				name := displayIdent(ident.Name)
 				if pf, ok := p.prepared[name]; ok && (pf.native != nil || pf.fv.IsValid()) {
@@ -450,65 +457,6 @@ func evalIdent(n *ast.Ident, env any, funcs map[string]any, fieldTags *structTag
 		ErrEvaluate, name, identHint(env, funcs, name, fieldTags))
 }
 
-// lookupEnv resolves a top-level identifier against env. env may be a
-// map[string]any, any map with string keys, a struct, a pointer to a
-// struct, or an *itEnv wrapping one of the above. For structs, configured
-// field tags participate in field lookup, and fields are preferred over
-// methods when both match. Methods are returned as bound function values
-// so they can be invoked by a CallExpr node. An itEnv binds its element
-// name (`it`, or the named binding of a three-arg form) and `index`
-// ahead of anything in its parent.
-func lookupEnv(env any, name string, fieldTags *structTagConfig) (any, bool, error) {
-	if env == nil {
-		return nil, false, nil
-	}
-	if it, ok := env.(*itEnv); ok {
-		switch name {
-		case it.elementName():
-			return it.it, true, nil
-		case "index":
-			return it.index, true, nil
-		}
-		return lookupEnv(it.parent, name, fieldTags)
-	}
-	if m, ok := env.(map[string]any); ok {
-		v, ok := m[name]
-		return v, ok, nil
-	}
-	rv := reflect.ValueOf(env)
-	// Check methods on the original (possibly pointer) value first so
-	// pointer-receiver methods are visible — but prefer struct fields if
-	// both exist with the same name.
-	orig := rv
-	if rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return nil, false, nil
-		}
-		rv = rv.Elem()
-	}
-	switch rv.Kind() {
-	case reflect.Struct:
-		fv, ok, err := structFieldByName(rv, name, fieldTags)
-		if err != nil {
-			return nil, false, err
-		}
-		if ok && fv.CanInterface() {
-			return fv.Interface(), true, nil
-		}
-		if mv := orig.MethodByName(name); mv.IsValid() {
-			return methodCallable(name, mv), true, nil
-		}
-	case reflect.Map:
-		if rv.Type().Key().Kind() == reflect.String {
-			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
-			if mv.IsValid() {
-				return mv.Interface(), true, nil
-			}
-		}
-	}
-	return nil, false, nil
-}
-
 func (p *Program) evalUnary(ctx context.Context, n *ast.UnaryExpr, env any, depth int) (any, error) {
 	v, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
@@ -569,75 +517,96 @@ func (p *Program) evalBinary(ctx context.Context, n *ast.BinaryExpr, env any, de
 	if err != nil {
 		return nil, err
 	}
+	if p.noOptimize {
+		return applyBinaryGeneral(n.Op, lhs, rhs)
+	}
 	return applyBinary(n.Op, lhs, rhs)
 }
 
+// applyBinary applies a non-short-circuit binary operator. It tries
+// applyBinaryFast, then applyBinaryGeneral; the two must agree wherever
+// the fast path answers (TestApplyBinaryFastMatchesGeneral).
 func applyBinary(op token.Token, lhs, rhs any) (any, error) {
-	// Fast path: exact int64/int/float64/string/bool operand pairs cover
-	// the vast majority of expressions and skip the reflect-based
-	// coercion helpers below. Unsupported operators fall through so the
-	// general path produces its usual error (with the original types).
+	if v, err, ok := applyBinaryFast(op, lhs, rhs); ok {
+		return v, err
+	}
+	return applyBinaryGeneral(op, lhs, rhs)
+}
+
+// applyBinaryFast handles exact int64/int/float64/string/bool operand
+// pairs, which cover the vast majority of expressions, without the
+// reflect-based coercion helpers. ok is false when it does not apply;
+// unsupported operators fall through so the general path produces its
+// usual error (with the original types).
+func applyBinaryFast(op token.Token, lhs, rhs any) (any, error, bool) {
 	switch l := lhs.(type) {
 	case int64:
 		switch r := rhs.(type) {
 		case int64:
 			if v, err, ok := applyInt64Binary(op, l, r); ok {
-				return v, err
+				return v, err, true
 			}
 		case int:
 			if v, err, ok := applyInt64Binary(op, l, int64(r)); ok {
-				return v, err
+				return v, err, true
 			}
 		case float64:
 			if v, err, ok := applyFloat64Binary(op, float64(l), r); ok {
-				return v, err
+				return v, err, true
 			}
 		}
 	case int:
 		switch r := rhs.(type) {
 		case int64:
 			if v, err, ok := applyInt64Binary(op, int64(l), r); ok {
-				return v, err
+				return v, err, true
 			}
 		case int:
 			if v, err, ok := applyInt64Binary(op, int64(l), int64(r)); ok {
-				return v, err
+				return v, err, true
 			}
 		case float64:
 			if v, err, ok := applyFloat64Binary(op, float64(l), r); ok {
-				return v, err
+				return v, err, true
 			}
 		}
 	case float64:
 		switch r := rhs.(type) {
 		case int64:
 			if v, err, ok := applyFloat64Binary(op, l, float64(r)); ok {
-				return v, err
+				return v, err, true
 			}
 		case int:
 			if v, err, ok := applyFloat64Binary(op, l, float64(r)); ok {
-				return v, err
+				return v, err, true
 			}
 		case float64:
 			if v, err, ok := applyFloat64Binary(op, l, r); ok {
-				return v, err
+				return v, err, true
 			}
 		}
 	case string:
 		if r, ok := rhs.(string); ok {
-			return applyStringBinary(op, l, r)
+			v, err := applyStringBinary(op, l, r)
+			return v, err, true
 		}
 	case bool:
 		if r, ok := rhs.(bool); ok {
 			switch op {
 			case token.EQL:
-				return l == r, nil
+				return l == r, nil, true
 			case token.NEQ:
-				return l != r, nil
+				return l != r, nil, true
 			}
 		}
 	}
 
+	return nil, nil, false
+}
+
+// applyBinaryGeneral applies op to any operand types, coercing numbers
+// of every Go width and named string/bool types.
+func applyBinaryGeneral(op token.Token, lhs, rhs any) (any, error) {
 	// String concatenation and comparison.
 	if ls, lok := asString(lhs); lok {
 		if rs, rok := asString(rhs); rok {
@@ -697,6 +666,20 @@ func applyBinary(op token.Token, lhs, rhs any) (any, error) {
 			return li <= ri, nil
 		case token.GEQ:
 			return li >= ri, nil
+		}
+	}
+
+	// Integers outside int64 (large uint64s) still order exactly.
+	if c, ok := compareIntegers(lhs, rhs); ok {
+		switch op {
+		case token.LSS:
+			return c < 0, nil
+		case token.GTR:
+			return c > 0, nil
+		case token.LEQ:
+			return c <= 0, nil
+		case token.GEQ:
+			return c >= 0, nil
 		}
 	}
 
@@ -877,8 +860,10 @@ func (p *Program) evalSelector(ctx context.Context, n *ast.SelectorExpr, env any
 	// embedded array gets memcpy'd on each access. The fast path skips
 	// plain map[string]any roots because the type-asserted map lookup
 	// in selectField is already faster than reflect MapIndex.
-	if v, ok, err := evalSelectorChainRV(n, env, depth, p.fieldTags); ok {
-		return v, err
+	if !p.noOptimize {
+		if v, ok, err := evalSelectorChainRV(n, env, depth, p.fieldTags); ok {
+			return v, err
+		}
 	}
 	recv, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
@@ -943,164 +928,16 @@ func evalSelectorChainRV(n *ast.SelectorExpr, env any, depth int, fieldTags *str
 	return rv.Interface(), true, nil
 }
 
-// lookupEnvRV mirrors lookupEnv but returns a reflect.Value so callers
-// can chain field accesses without boxing intermediate struct values.
-// Map and itEnv lookups still go through any internally because their
-// stored values already live behind interfaces.
-func lookupEnvRV(env any, name string, fieldTags *structTagConfig) (reflect.Value, bool, error) {
-	if env == nil {
-		return reflect.Value{}, false, nil
-	}
-	if it, ok := env.(*itEnv); ok {
-		switch name {
-		case it.elementName():
-			return reflect.ValueOf(it.it), true, nil
-		case "index":
-			return reflect.ValueOf(it.index), true, nil
-		}
-		return lookupEnvRV(it.parent, name, fieldTags)
-	}
-	if m, ok := env.(map[string]any); ok {
-		v, ok := m[name]
-		if !ok {
-			return reflect.Value{}, false, nil
-		}
-		return reflect.ValueOf(v), true, nil
-	}
-	rv := reflect.ValueOf(env)
-	orig := rv
-	if rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return reflect.Value{}, false, nil
-		}
-		rv = rv.Elem()
-	}
-	switch rv.Kind() {
-	case reflect.Struct:
-		fv, ok, err := structFieldByName(rv, name, fieldTags)
-		if err != nil {
-			return reflect.Value{}, false, err
-		}
-		if ok && fv.CanInterface() {
-			return fv, true, nil
-		}
-		if mv := orig.MethodByName(name); mv.IsValid() {
-			return reflect.ValueOf(methodCallable(name, mv)), true, nil
-		}
-	case reflect.Map:
-		if rv.Type().Key().Kind() == reflect.String {
-			mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
-			if mv.IsValid() {
-				return mv, true, nil
-			}
-		}
-	}
-	return reflect.Value{}, false, nil
-}
-
-// selectFieldRV reads a field/key from rv without boxing the parent
-// through any. It mirrors selectField's behavior on structs and
-// string-keyed maps, transparently dereffing pointers and unwrapping
-// interface values. Errors are produced lazily — the cold path may
-// call Interface() to build a "did you mean" hint.
-func selectFieldRV(rv reflect.Value, name string, fieldTags *structTagConfig) (reflect.Value, error) {
-	for rv.Kind() == reflect.Interface && !rv.IsNil() {
-		rv = rv.Elem()
-	}
-	if !rv.IsValid() {
-		return reflect.Value{}, fmt.Errorf("%w: cannot access %q on nil", ErrEvaluate, name)
-	}
-	if rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return reflect.Value{}, fmt.Errorf("%w: cannot access %q on nil pointer", ErrEvaluate, name)
-		}
-		rv = rv.Elem()
-	}
-	switch rv.Kind() {
-	case reflect.Struct:
-		fv, ok, err := structFieldByName(rv, name, fieldTags)
-		if err != nil {
-			return reflect.Value{}, err
-		}
-		if !ok || !fv.IsValid() || !fv.CanInterface() {
-			return reflect.Value{}, fmt.Errorf("%w: field %q not found on %v%s",
-				ErrEvaluate, name, rv.Type(), fieldHint(rv.Interface(), name, fieldTags))
-		}
-		return fv, nil
-	case reflect.Map:
-		if rv.Type().Key().Kind() != reflect.String {
-			return reflect.Value{}, fmt.Errorf("%w: cannot select %q on map with non-string keys", ErrEvaluate, name)
-		}
-		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
-		if !mv.IsValid() {
-			return reflect.Value{}, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, name, fieldHint(rv.Interface(), name, fieldTags))
-		}
-		return mv, nil
-	}
-	return reflect.Value{}, fmt.Errorf("%w: cannot select %q on %v", ErrEvaluate, name, rv.Type())
-}
-
-func selectField(recv any, name string, fieldTags *structTagConfig) (any, error) {
-	// Translate rewritten identifiers (currently only `map`) back to
-	// their user-visible form so field/key/error lookups match what
-	// the user actually typed.
-	name = displayIdent(name)
-	if recv == nil {
-		return nil, fmt.Errorf("%w: cannot access %q on nil", ErrEvaluate, name)
-	}
-	if m, ok := recv.(map[string]any); ok {
-		v, ok := m[name]
-		if !ok {
-			return nil, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, name, fieldHint(recv, name, fieldTags))
-		}
-		return v, nil
-	}
-	rv := reflect.ValueOf(recv)
-	switch rv.Kind() {
-	case reflect.Map:
-		if rv.Type().Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("%w: cannot select %q on map with non-string keys", ErrEvaluate, name)
-		}
-		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
-		if !mv.IsValid() {
-			return nil, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, name, fieldHint(recv, name, fieldTags))
-		}
-		return mv.Interface(), nil
-	case reflect.Struct:
-		fv, ok, err := structFieldByName(rv, name, fieldTags)
-		if err != nil {
-			return nil, err
-		}
-		if !ok || !fv.IsValid() {
-			return nil, fmt.Errorf("%w: field %q not found on %T%s",
-				ErrEvaluate, name, recv, fieldHint(recv, name, fieldTags))
-		}
-		if !fv.CanInterface() {
-			// Unexported field: deny access rather than panicking via Interface().
-			return nil, fmt.Errorf("%w: field %q not found on %T%s",
-				ErrEvaluate, name, recv, fieldHint(recv, name, fieldTags))
-		}
-		return fv.Interface(), nil
-	case reflect.Pointer:
-		if rv.IsNil() {
-			return nil, fmt.Errorf("%w: cannot access %q on nil pointer", ErrEvaluate, name)
-		}
-		return selectField(rv.Elem().Interface(), name, fieldTags)
-	}
-	return nil, fmt.Errorf("%w: cannot select %q on %T", ErrEvaluate, name, recv)
-}
-
 func (p *Program) evalIndex(ctx context.Context, n *ast.IndexExpr, env any, depth int) (any, error) {
 	// Fast path: filter(xs, p)[k] with a constant k streams the matches
 	// instead of materializing the full filtered slice.
-	if v, ok, err := p.tryFilterIndex(ctx, n, env, depth); ok {
-		return v, err
-	}
-	if v, ok, err := p.evalIndexChainRV(ctx, n, env, depth); ok {
-		return v, err
+	if !p.noOptimize {
+		if v, ok, err := p.tryFilterIndex(ctx, n, env, depth); ok {
+			return v, err
+		}
+		if v, ok, err := p.evalIndexChainRV(ctx, n, env, depth); ok {
+			return v, err
+		}
 	}
 	recv, err := p.eval(ctx, n.X, env, depth)
 	if err != nil {
@@ -1202,66 +1039,6 @@ walk:
 	return rv.Interface(), true, nil
 }
 
-// mapStringAnyType lets indexValueRV mirror indexValue's dedicated
-// map[string]any branch, keeping error messages identical between the
-// fast and general index paths.
-var mapStringAnyType = reflect.TypeOf(map[string]any(nil))
-
-// indexValueRV mirrors indexValue but keeps the receiver in reflect
-// space so intermediate hops of a chain are never boxed through any.
-func indexValueRV(rv reflect.Value, idx any) (reflect.Value, error) {
-	for rv.Kind() == reflect.Interface && !rv.IsNil() {
-		rv = rv.Elem()
-	}
-	if !rv.IsValid() || (rv.Kind() == reflect.Interface && rv.IsNil()) {
-		return reflect.Value{}, fmt.Errorf("%w: cannot index nil", ErrEvaluate)
-	}
-	if rv.Type() == mapStringAnyType {
-		key, ok := idx.(string)
-		if !ok {
-			return reflect.Value{}, fmt.Errorf("%w: map index must be string, got %T", ErrEvaluate, idx)
-		}
-		mv := rv.MapIndex(reflect.ValueOf(key))
-		if !mv.IsValid() {
-			return reflect.Value{}, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, key, fieldHint(rv.Interface(), key, nil))
-		}
-		return mv, nil
-	}
-	switch rv.Kind() {
-	case reflect.Slice, reflect.Array:
-		i, err := toIndexInt(idx)
-		if err != nil {
-			return reflect.Value{}, err
-		}
-		if i < 0 || i >= int64(rv.Len()) {
-			return reflect.Value{}, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, rv.Len())
-		}
-		return rv.Index(int(i)), nil
-	case reflect.String:
-		i, err := toIndexInt(idx)
-		if err != nil {
-			return reflect.Value{}, err
-		}
-		runes := []rune(rv.String())
-		if i < 0 || i >= int64(len(runes)) {
-			return reflect.Value{}, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, len(runes))
-		}
-		return reflect.ValueOf(string(runes[i])), nil
-	case reflect.Map:
-		kv, err := mapKey(rv.Type().Key(), idx)
-		if err != nil {
-			return reflect.Value{}, err
-		}
-		mv := rv.MapIndex(kv)
-		if !mv.IsValid() {
-			return reflect.Value{}, fmt.Errorf("%w: key %v not found", ErrEvaluate, idx)
-		}
-		return mv, nil
-	}
-	return reflect.Value{}, fmt.Errorf("%w: cannot index %v", ErrEvaluate, rv.Type())
-}
-
 // tryFilterIndex recognises `filter(xs, predicate)[N]` where N is a
 // non-negative integer literal and `filter` is the built-in special
 // form (not shadowed by env or funcs). When matched, it iterates xs
@@ -1347,57 +1124,6 @@ func (p *Program) tryFilterIndex(ctx context.Context, n *ast.IndexExpr, env any,
 		return result, true, nil
 	}
 	return nil, true, fmt.Errorf("%w: index %d out of range", ErrEvaluate, target)
-}
-
-func indexValue(recv, idx any) (any, error) {
-	if recv == nil {
-		return nil, fmt.Errorf("%w: cannot index nil", ErrEvaluate)
-	}
-	if m, ok := recv.(map[string]any); ok {
-		key, ok := idx.(string)
-		if !ok {
-			return nil, fmt.Errorf("%w: map index must be string, got %T", ErrEvaluate, idx)
-		}
-		v, ok := m[key]
-		if !ok {
-			return nil, fmt.Errorf("%w: key %q not found%s",
-				ErrEvaluate, key, fieldHint(recv, key, nil))
-		}
-		return v, nil
-	}
-	rv := reflect.ValueOf(recv)
-	switch rv.Kind() {
-	case reflect.Slice, reflect.Array:
-		i, err := toIndexInt(idx)
-		if err != nil {
-			return nil, err
-		}
-		if i < 0 || i >= int64(rv.Len()) {
-			return nil, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, rv.Len())
-		}
-		return rv.Index(int(i)).Interface(), nil
-	case reflect.String:
-		i, err := toIndexInt(idx)
-		if err != nil {
-			return nil, err
-		}
-		runes := []rune(rv.String())
-		if i < 0 || i >= int64(len(runes)) {
-			return nil, fmt.Errorf("%w: index %d out of range [0, %d)", ErrEvaluate, i, len(runes))
-		}
-		return string(runes[i]), nil
-	case reflect.Map:
-		kv, err := mapKey(rv.Type().Key(), idx)
-		if err != nil {
-			return nil, err
-		}
-		mv := rv.MapIndex(kv)
-		if !mv.IsValid() {
-			return nil, fmt.Errorf("%w: key %v not found", ErrEvaluate, idx)
-		}
-		return mv.Interface(), nil
-	}
-	return nil, fmt.Errorf("%w: cannot index %T", ErrEvaluate, recv)
 }
 
 func (p *Program) evalCall(ctx context.Context, n *ast.CallExpr, env any, depth int) (any, error) {
@@ -1571,6 +1297,6 @@ func resolveMethod(recv any, name string, fieldTags *structTagConfig) (any, erro
 
 func methodCallable(name string, mv reflect.Value) Func {
 	return func(ctx context.Context, args []any) (any, error) {
-		return callMethodValue(ctx, name, mv, args)
+		return callFuncValue(ctx, name, mv, args)
 	}
 }

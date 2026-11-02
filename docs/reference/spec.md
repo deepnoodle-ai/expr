@@ -90,7 +90,10 @@ Compile time with `ErrCompile`.
 
 - String vs string uses `strings` comparison.
 - Numeric comparisons work across any combination of integer kinds and
-  floats (see [Equality](#equality)).
+  floats (see [Equality](#equality)). Two integers compare exactly,
+  whatever their width or signedness, so `uint64` values above
+  `MaxInt64` order correctly; an integer and a float compare as
+  `float64`.
 - Other comparable Go types use native equality when both sides are the
   same type. Mismatched-but-comparable types yield `false` without an
   error. Uncomparable types (slices, maps, funcs) return `ErrEvaluate`.
@@ -204,9 +207,11 @@ accessing a field on a piped result is written
 2. `X == nil` is `true` if `X` is a typed nil value of a nilable kind
    (chan, func, interface, map, pointer, slice). This means a `(*T)(nil)`
    or `[]any(nil)` stored in `any` compares equal to the literal `nil`.
-3. If both sides are any combination of integer or float kinds, they
-   convert to `float64` and compare. `int32(7) == int64(7) == float64(7)`
-   is `true`.
+3. If both sides are integers of any width or signedness (including
+   named integer types), they compare exactly: a value above 2^53 is
+   not rounded, and `uint64(18446744073709551615)` equals nothing but
+   itself. If either side is a float, both convert to `float64` and
+   compare. `int32(7) == int64(7) == float64(7)` is `true`.
 4. Otherwise: if both values are comparable, Go's `==` is used.
    Different types compare as `false` (no error). Uncomparable values
    return `ErrEvaluate` — including a struct or array whose type is
@@ -285,16 +290,22 @@ rather than choosing one by declaration order.
 
 ## Selectors (`x.y`)
 
-`x.y` evaluates `x`, then looks up `y` on the result:
+`x.y` evaluates `x`, then looks up `y` on the result. The rules below
+are shared by `x.y`, `x[i]` and the optional forms `x?.y` / `x?[i]`, on
+every evaluation path:
 
+- The receiver is unwrapped through pointers and interfaces at any
+  depth (`*T`, `**T`, an interface field holding a pointer). A nil met
+  along the way is a nil receiver.
 - Nil receiver → `ErrEvaluate`.
 - `map[string]any` or any map with string keys → `y` is a key. Missing
   keys return an error (not a zero value).
 - Map with non-string keys → `ErrEvaluate`.
 - Struct → the exported field `y`, using configured struct tags if any,
   or `ErrEvaluate` if missing.
-- Pointer to struct → dereferenced and re-tried. Nil pointer →
-  `ErrEvaluate`.
+- An unexported field, or a field promoted through a nil embedded
+  pointer, is not readable: the first is "not found", the second an
+  `ErrEvaluate` naming the nil pointer.
 - Anything else → `ErrEvaluate`.
 
 Selectors chain left-to-right: `a.b.c` is `(a.b).c`. Selector chains are
@@ -309,11 +320,17 @@ internal use. This applies to field names as well.
 
 ## Index expressions (`x[i]`)
 
+The receiver is unwrapped through pointers and interfaces as for
+[selectors](#selectors-xy), so a `*[3]int` indexes like a `[3]int`. A
+nil receiver → `ErrEvaluate`.
+
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
 - Other maps: `i` is converted to the map's key type if assignable or
   convertible. A nil index on a typed map is an error (not a panic), as
   is a key that cannot be hashed (`m[[1]]` on a `map[any]any`) or a
-  slice too short to convert to an array key type.
+  slice too short to convert to an array key type. An integer key type
+  takes a float only when it is integral, as slices do: `m[1.0]` reads
+  `m[1]`, `m[1.5]` is an error.
 - Slice, array: `i` must be an integer or an integer-valued float
   (`xs[1.0]` works, `xs[1.5]` is an error). Negative indices and
   indices `>= len(x)` return `ErrEvaluate` (expr does not support
@@ -368,7 +385,9 @@ before any reflect call that would panic.
   **range-checked** conversion to the declared parameter type. For
   example, `int64(10)` → `int8` succeeds; `int64(300)` → `int8` is an
   error (not a silent wraparound). Negative → unsigned fails.
-  `float64`↔`float32` is allowed and may lose precision.
+  `float64`↔`float32` is allowed and may lose precision. A float passed
+  to an integer parameter truncates toward zero, as Go's conversion
+  does, and must fit the type.
 - Nil may be passed for any nilable-kind parameter (interface, pointer,
   map, slice, chan, func). Passing nil to a non-nilable parameter is an
   error.
@@ -386,8 +405,15 @@ Supported:
   replaces the normal result.
 
 Anything else (two non-error returns, three returns, `(error, T)`)
-returns `ErrEvaluate`. Errors from functions propagate wrapped inside
-an `ErrEvaluate` chain via `errors.Is`.
+returns `ErrEvaluate` before the function is called. Errors from
+functions propagate wrapped inside an `ErrEvaluate` chain via
+`errors.Is`.
+
+Registered functions, functions stored in env or in a struct field, and
+bound methods share one call path: the same argument checks and
+conversions, the same result rules, and the same recovery of a runtime
+panic in the callee as `ErrEvaluate`. A conversion failure is reported
+before the function runs.
 
 ## Builtins
 
@@ -698,8 +724,10 @@ config?.feature?.enabled
 
 The semantics:
 
-- If the receiver is `nil`, the result is `nil` and the right-hand
-  side is not consulted.
+- If the receiver is `nil` — including a typed nil that `== nil`
+  reports as nil, and a nil met while unwrapping pointers — the result
+  is `nil` and the right-hand side (the index expression) is not
+  evaluated.
 - For `?.`, a missing struct field or absent map key resolves to
   `nil`.
 - For `?[`, a missing map key or an out-of-range slice/string index

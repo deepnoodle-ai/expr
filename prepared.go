@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 )
 
 // Func is a native dispatcher signature. Functions registered with
@@ -17,32 +18,23 @@ import (
 type Func func(ctx context.Context, args []any) (any, error)
 
 // preparedFunc holds everything callPrepared needs to invoke a
-// registered function, built once at Engine construction. The native
-// field is the fast path; when it is nil the reflect fields drive a
-// fallback that reuses the cached type/value rather than re-deriving
-// them on every call.
+// registered function, built once when the option is applied. The
+// native field is the fast path; when it is nil, fv and sig drive the
+// reflect path shared with env functions and bound methods.
 type preparedFunc struct {
 	name string
 
 	// Native fast path.
 	native Func
 
-	// Reflect fallback metadata (only populated when native is nil).
-	fv           reflect.Value
-	ft           reflect.Type
-	paramOff     int // 1 if the function takes context.Context as its first param
-	declaredIn   int // user-visible parameter count (excluding ctx)
-	fixed        int // len(declaredIn) - 1 for variadic, else declaredIn
-	variadic     bool
-	paramTypes   []reflect.Type // cached ft.In(paramOff+i) for i in [0, declaredIn)
-	variadicElem reflect.Type   // element type if variadic
-	numOut       int
-	hasErrRet    bool // true if second return is error
+	// Reflect path (only populated when native is nil).
+	fv  reflect.Value
+	sig *callSig
 }
 
 // prepareFunc inspects fn and builds a preparedFunc. If fn already
-// matches the native Func shape it is stored directly; otherwise the
-// function's reflect metadata is cached for the fallback path.
+// matches the native Func shape it is stored directly; otherwise its
+// signature is validated and cached for the reflect path.
 func prepareFunc(name string, fn any) (*preparedFunc, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("function %q is nil", name)
@@ -60,101 +52,120 @@ func prepareFunc(name string, fn any) (*preparedFunc, error) {
 	if fv.IsNil() {
 		return nil, fmt.Errorf("function %q is a nil function value", name)
 	}
-	ft := fv.Type()
-	p := &preparedFunc{
-		name:     name,
-		fv:       fv,
-		ft:       ft,
-		variadic: ft.IsVariadic(),
-		numOut:   ft.NumOut(),
+	sig, err := sigOf(fv.Type())
+	if err != nil {
+		return nil, fmt.Errorf("function %q %v", name, err)
 	}
-	if ft.NumIn() > 0 && ft.In(0) == ctxType {
-		p.paramOff = 1
-	}
-	p.declaredIn = ft.NumIn() - p.paramOff
-	if p.variadic {
-		p.fixed = p.declaredIn - 1
-		p.variadicElem = ft.In(ft.NumIn() - 1).Elem()
-	} else {
-		p.fixed = p.declaredIn
-	}
-	p.paramTypes = make([]reflect.Type, p.declaredIn)
-	for i := 0; i < p.declaredIn; i++ {
-		p.paramTypes[i] = ft.In(p.paramOff + i)
-	}
-	if p.numOut == 2 {
-		if !ft.Out(1).Implements(errValType) {
-			return nil, fmt.Errorf("function %q: second return must be error, got %v", name, ft.Out(1))
-		}
-		p.hasErrRet = true
-	} else if p.numOut > 2 {
-		return nil, fmt.Errorf("function %q returns %d values (expected 0, 1, or (T, error))", name, p.numOut)
-	}
-	return p, nil
+	return &preparedFunc{name: name, fv: fv, sig: sig}, nil
 }
 
 // callPrepared invokes pf with args. Uses the native dispatcher when
-// available, otherwise takes the reflect fallback path using cached
-// metadata.
+// available, otherwise the shared reflect path.
 func callPrepared(ctx context.Context, pf *preparedFunc, args []any) (any, error) {
 	if pf.native != nil {
 		v, err := pf.native(ctx, args)
 		return v, wrapCallErr(pf.name, err)
 	}
-	return callPreparedReflect(ctx, pf, args)
+	return invokeReflect(ctx, pf.name, pf.fv, pf.sig, args)
 }
 
-func callPreparedReflect(ctx context.Context, pf *preparedFunc, args []any) (any, error) {
-	if pf.variadic {
-		if len(args) < pf.fixed {
-			return nil, fmt.Errorf("%w: %q expects at least %d args, got %d", ErrEvaluate, pf.name, pf.fixed, len(args))
-		}
-	} else if len(args) != pf.declaredIn {
-		return nil, fmt.Errorf("%w: %q expects %d args, got %d", ErrEvaluate, pf.name, pf.declaredIn, len(args))
-	}
+// callSig is what the reflect call path needs to know about a function
+// type: how to build its arguments and read its results. It is computed
+// once per type (sigOf) and shared by registered functions, env
+// functions and bound methods, so the three apply the same argument
+// conversions and result rules.
+type callSig struct {
+	paramOff     int // 1 if the function takes context.Context as its first param
+	declaredIn   int // user-visible parameter count (excluding ctx)
+	fixed        int // declaredIn - 1 for variadic, else declaredIn
+	variadic     bool
+	paramTypes   []reflect.Type // ft.In(paramOff+i) for i in [0, declaredIn)
+	variadicElem reflect.Type   // element type if variadic
+	numOut       int
+}
 
-	in := make([]reflect.Value, pf.paramOff+len(args))
-	if pf.paramOff == 1 {
+var callSigs sync.Map // reflect.Type -> *callSig or error
+
+// sigOf returns the callSig of a function type, or an error (without an
+// ErrEvaluate/ErrCompile prefix or function name) for a result shape
+// expr does not support.
+func sigOf(ft reflect.Type) (*callSig, error) {
+	if cached, ok := callSigs.Load(ft); ok {
+		if err, isErr := cached.(error); isErr {
+			return nil, err
+		}
+		return cached.(*callSig), nil
+	}
+	sig, err := buildSig(ft)
+	if err != nil {
+		callSigs.Store(ft, err)
+		return nil, err
+	}
+	callSigs.Store(ft, sig)
+	return sig, nil
+}
+
+func buildSig(ft reflect.Type) (*callSig, error) {
+	s := &callSig{variadic: ft.IsVariadic(), numOut: ft.NumOut()}
+	switch {
+	case s.numOut > 2:
+		return nil, fmt.Errorf("returns %d values (expected 0, 1, or (T, error))", s.numOut)
+	case s.numOut == 2 && !ft.Out(1).Implements(errValType):
+		return nil, fmt.Errorf("second return must be error, got %v", ft.Out(1))
+	}
+	if ft.NumIn() > 0 && ft.In(0) == ctxType {
+		s.paramOff = 1
+	}
+	s.declaredIn = ft.NumIn() - s.paramOff
+	s.fixed = s.declaredIn
+	if s.variadic {
+		s.fixed--
+		s.variadicElem = ft.In(ft.NumIn() - 1).Elem()
+	}
+	s.paramTypes = make([]reflect.Type, s.declaredIn)
+	for i := range s.paramTypes {
+		s.paramTypes[i] = ft.In(s.paramOff + i)
+	}
+	return s, nil
+}
+
+// invokeReflect checks and converts args for sig, calls fv, and reads
+// its results. A runtime panic in the callee becomes an ErrEvaluate.
+func invokeReflect(ctx context.Context, name string, fv reflect.Value, sig *callSig, args []any) (any, error) {
+	if sig.variadic {
+		if len(args) < sig.fixed {
+			return nil, fmt.Errorf("%w: %q expects at least %d args, got %d", ErrEvaluate, name, sig.fixed, len(args))
+		}
+	} else if len(args) != sig.declaredIn {
+		return nil, fmt.Errorf("%w: %q expects %d args, got %d", ErrEvaluate, name, sig.declaredIn, len(args))
+	}
+	in := make([]reflect.Value, sig.paramOff+len(args))
+	if sig.paramOff == 1 {
 		in[0] = reflect.ValueOf(ctx)
 	}
-	for i := 0; i < pf.fixed; i++ {
-		v, err := convertArg(pf.name, i, args[i], pf.paramTypes[i])
+	for i, a := range args {
+		want := sig.variadicElem
+		if i < sig.fixed || !sig.variadic {
+			want = sig.paramTypes[i]
+		}
+		v, err := convertArg(name, i, a, want)
 		if err != nil {
 			return nil, err
 		}
-		in[pf.paramOff+i] = v
+		in[sig.paramOff+i] = v
 	}
-	if pf.variadic {
-		for i := pf.fixed; i < len(args); i++ {
-			v, err := convertArg(pf.name, i, args[i], pf.variadicElem)
-			if err != nil {
-				return nil, err
-			}
-			in[pf.paramOff+i] = v
-		}
-	} else {
-		for i := pf.fixed; i < len(args); i++ {
-			v, err := convertArg(pf.name, i, args[i], pf.paramTypes[i])
-			if err != nil {
-				return nil, err
-			}
-			in[pf.paramOff+i] = v
-		}
-	}
-
-	out, err := callReflectRecoverRuntime(pf.name, pf.fv, in)
+	out, err := callReflectRecoverRuntime(name, fv, in)
 	if err != nil {
 		return nil, err
 	}
-	switch pf.numOut {
+	switch sig.numOut {
 	case 0:
 		return nil, nil
 	case 1:
 		return out[0].Interface(), nil
 	}
-	// (T, error)
 	if err := callResultErr(out[1]); err != nil {
-		return nil, wrapCallErr(pf.name, err)
+		return nil, wrapCallErr(name, err)
 	}
 	return out[0].Interface(), nil
 }

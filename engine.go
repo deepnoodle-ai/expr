@@ -90,6 +90,9 @@ type compileConfig struct {
 	fieldTags  *structTagConfig
 	evalBudget int
 	errs       []error
+	// noOptimize turns off constant folding and every evaluator fast
+	// path, so tests can compare optimized and general evaluation.
+	noOptimize bool
 
 	tmplOpen      string
 	tmplClose     string
@@ -142,6 +145,15 @@ func WithFunctions(funcs map[string]any) Option {
 			c.prepared[name] = pf
 		}
 	}
+}
+
+// withoutOptimizations compiles a program that skips constant folding
+// and every evaluator fast path (prepared-call cache, reflect-space
+// selector and index chains, filter(...)[k] streaming, typed binary
+// operators). Results must not depend on it; the differential tests in
+// optimize_equiv_test.go hold that.
+func withoutOptimizations() Option {
+	return func(c *compileConfig) { c.noOptimize = true }
 }
 
 // WithEvalBudget bounds the total work a single Run may perform. Each
@@ -247,6 +259,7 @@ func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 		prepared:   cfg.prepared,
 		fieldTags:  cfg.fieldTags,
 		evalBudget: cfg.evalBudget,
+		noOptimize: cfg.noOptimize,
 	}
 	p.compile()
 	return p, nil
