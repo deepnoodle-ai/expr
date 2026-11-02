@@ -20,7 +20,9 @@ parameter interpolation.
 | ------------------- | ------------------------------------------------------------------ |
 | `engine.go`         | `Compile`, `Option`, `map`/`if` and keyword field preprocessing    |
 | `program.go`        | AST walker — the evaluator                                         |
-| `reflect.go` + `prepared.go` | Env lookup, function dispatch, cached signatures          |
+| `access.go`         | The one implementation of `x.y`, `x[i]`, `?.`, `?[` and env lookup |
+| `reflect.go` + `prepared.go` | Conversions, equality, function dispatch, cached `callSig`s |
+| `format.go`         | Bounded, cycle-safe rendering for `string`, `sprintf`, templates   |
 | `builtins.go`       | Default function set exposed by `Builtins()` / `WithBuiltins()`    |
 | `builtin_groups.go` | Opt-in `MathFuncs()` / `StringFuncs()` / `CollectionFuncs()` sets  |
 | `higher_order.go`   | `map`, `filter`, `any`, `all`, `find`, `count`, `try`, `if` forms  |
@@ -30,7 +32,9 @@ parameter interpolation.
 | `template.go`       | `${...}` interpolation via `NewTemplate` / `Render`                |
 | `truthy.go`         | `IsTruthy` rules used by `!`, `&&`, `\|\|`, `bool(v)`              |
 | `suggest.go`        | "Did you mean…" for unknown identifiers                            |
+| `internal/srcedit/` | Shared scanner, bracket matcher and splicer for the source rewrites |
 | `internal/jsonlit/` | Pre-parse rewrite of bare `[...]` / `{...}` JSON literals          |
+| `internal/optaccess/` | Pre-parse rewrite of `?.` / `?[` into sentinel calls             |
 | `cmd/expr/`         | Small CLI for one-off evaluation                                   |
 | `docs/reference/spec.md`   | Authoritative language spec                                 |
 | `docs/guides/`             | User-facing guides (examples, functions, env, sandboxing, …) |
@@ -51,6 +55,14 @@ parameter interpolation.
   value (`[upper, 1]`), which `Run` still evaluates.
 - When changing language behavior, update `docs/reference/spec.md` in the same change; if the
   change affects how expressions *look*, update `docs/guides/examples.md` and `llms.txt` too.
+- Every optimization must be unobservable. A fast path or fold needs an
+  equivalence test in `optimize_equiv_test.go` (compiled with and without
+  `withoutOptimizations()`) next to its benchmark.
+- Value-shape rules live in one place (`access.go`, `mapKey`, `convertValue`,
+  `canCompare`, `callSig`). `value_matrix_test.go`, `call_matrix_test.go` and
+  `hostgen_test.go` hold every path to them; keep new paths on the shared code.
+- A test that could overflow the stack or hang belongs in
+  `isolated_test.go`, which runs each case in a child process.
 - Guide pages under `docs/guides/` have runnable companions under `examples/` and
   tests in `docs_guides_test.go` / `docs_examples_test.go`. When you change a guide's
   code snippets, update the matching test so the docs stay honest.

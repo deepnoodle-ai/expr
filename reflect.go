@@ -197,10 +197,19 @@ func mapKey(keyType reflect.Type, idx any) (reflect.Value, error) {
 			return reflect.Value{}, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
 		}
 	}
-	if !kv.Comparable() {
+	if !canCompare(kv) {
 		return reflect.Value{}, fmt.Errorf("%w: cannot use unhashable %T as map key", ErrEvaluate, idx)
 	}
 	return kv, nil
+}
+
+// canCompare reports whether Go's == (and map hashing) accepts v without
+// panicking. Both checks are needed: Type.Comparable misses an
+// interface field holding a slice, and Value.Comparable reports a
+// zero-length array of uncomparable elements ([0]map[K]V) comparable
+// although == on it panics.
+func canCompare(v reflect.Value) bool {
+	return v.IsValid() && v.Type().Comparable() && v.Comparable()
 }
 
 func isNumericKind(k reflect.Kind) bool {
@@ -524,7 +533,7 @@ func looseEqual(lhs, rhs any) (bool, bool) {
 	// interface fields and elements: a struct or array holding a slice
 	// has a comparable type but panics when compared.
 	lv, rv := reflect.ValueOf(lhs), reflect.ValueOf(rhs)
-	if !lv.Comparable() || !rv.Comparable() {
+	if !canCompare(lv) || !canCompare(rv) {
 		return false, false
 	}
 	if lv.Type() != rv.Type() {

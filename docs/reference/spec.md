@@ -443,7 +443,7 @@ The standard set is:
 | Name            | Signature                       | Notes |
 | --------------- | ------------------------------- | ----- |
 | `len(v)`        | `(any) -> int, error`           | Rune count for strings, element count for slice/array/map/chan, `0` for nil, error otherwise. |
-| `string(v)`     | `(any) -> string`               | Passthrough for strings, `fmt.Sprintf("%v", v)` otherwise, `""` for nil. |
+| `string(v)`     | `(any) -> string`               | Passthrough for strings, `fmt.Sprintf("%v", v)` otherwise, `""` for nil. Map entries are ordered by rendered key, then key type, then rendered value, so the result is the same on every run. Cyclic, very deep and very large values render with markers (see [Limits and safety](#limits-and-safety)). |
 | `int(v)`        | `(any) -> int64, error`         | Numeric values convert (float truncates toward zero). Strings are parsed strictly with `strconv.ParseInt` base-10 (trimmed whitespace, no `0x`, no trailing garbage). |
 | `float(v)`      | `(any) -> float64, error`       | Like `int`, but `strconv.ParseFloat` 64-bit. |
 | `bool(v)`       | `(any) -> bool`                 | Same semantics as [truthiness](#truthiness). |

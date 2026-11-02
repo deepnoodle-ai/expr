@@ -244,3 +244,47 @@ func TestRuntimeRegressionSumMixedNumericPromotion(t *testing.T) {
 		})
 	}
 }
+
+// Found by TestHostValuesRandom (seed 90): reflect.Value.Comparable
+// reports a zero-length array whose elements are arrays (or structs, or
+// interfaces) of uncomparable values comparable, since it checks each of
+// no elements, but Go's == on it panics, so equality and map keys check
+// the type too.
+func TestRuntimeRegressionZeroLengthUncomparableArray(t *testing.T) {
+	v := [0][1]map[string]int{}
+	for _, source := range []string{"V == V", "V != V", "contains([V], V)", "m[V]", "m?[V]"} {
+		t.Run(source, func(t *testing.T) {
+			defer runtimeRegressionNoPanic(t)
+			p, err := Compile(source, WithBuiltins())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := p.Run(t.Context(), map[string]any{"V": v, "m": map[any]any{}})
+			if source == "contains([V], V)" {
+				if err != nil || got != false {
+					t.Fatalf("got (%v, %v), want (false, nil)", got, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEvaluate) {
+				t.Fatalf("got (%v, %v), want ErrEvaluate", got, err)
+			}
+		})
+	}
+}
+
+// Found by TestHostValuesRandom (seed 2623): map keys that render alike
+// (int 1 and uint16 1 in a map[any]V) sorted by rendered text alone, so
+// their order followed map iteration and string(m) varied between runs.
+func TestRuntimeRegressionFormatMapKeysRenderingAlike(t *testing.T) {
+	m := map[any]any{1: "int", uint16(1): "uint16", int64(1): "int64"}
+	want := safeFormatValue(m)
+	for i := 0; i < 50; i++ {
+		if got := safeFormatValue(m); got != want {
+			t.Fatalf("formatting varies: %q then %q", want, got)
+		}
+	}
+	if want != "map[1:int 1:int64 1:uint16]" {
+		t.Fatalf("got %q, want keys ordered by type name on a tie", want)
+	}
+}

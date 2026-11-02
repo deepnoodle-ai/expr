@@ -126,24 +126,36 @@ func (st *formatState) formatValue(b *strings.Builder, rv reflect.Value) {
 		}
 		defer delete(st.seen, v)
 		b.WriteString("map[")
-		// Format each key once, with this map already marked as seen: a
-		// key that leads back to the map renders <cycle> instead of
-		// recursing, and the sort compares the rendered strings.
+		// Format each entry once, with this map already marked as seen:
+		// a key that leads back to the map renders <cycle> instead of
+		// recursing. Entries sort by rendered key, then key type, then
+		// rendered value, so keys that render alike (int 1 and uint16 1
+		// in a map[any]V, or NaNs) do not fall back to map order.
 		keys := rv.MapKeys()
 		entries := make([]mapEntry, len(keys))
 		for i, k := range keys {
-			var kb strings.Builder
+			var kb, vb strings.Builder
 			st.format(&kb, k)
-			entries[i] = mapEntry{key: kb.String(), value: rv.MapIndex(k)}
+			st.format(&vb, rv.MapIndex(k))
+			entries[i] = mapEntry{key: kb.String(), keyType: dynamicTypeName(k), value: vb.String()}
 		}
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+		sort.Slice(entries, func(i, j int) bool {
+			a, b := entries[i], entries[j]
+			if a.key != b.key {
+				return a.key < b.key
+			}
+			if a.keyType != b.keyType {
+				return a.keyType < b.keyType
+			}
+			return a.value < b.value
+		})
 		for i, e := range entries {
 			if i > 0 {
 				b.WriteByte(' ')
 			}
 			b.WriteString(e.key)
 			b.WriteByte(':')
-			st.format(b, e.value)
+			b.WriteString(e.value)
 		}
 		b.WriteByte(']')
 	case reflect.Slice:
@@ -186,8 +198,19 @@ func (st *formatState) formatValue(b *strings.Builder, rv reflect.Value) {
 }
 
 type mapEntry struct {
-	key   string
-	value reflect.Value
+	key, keyType, value string
+}
+
+// dynamicTypeName names the type of the value in k, looking through an
+// interface.
+func dynamicTypeName(k reflect.Value) string {
+	for k.Kind() == reflect.Interface && !k.IsNil() {
+		k = k.Elem()
+	}
+	if !k.IsValid() || k.Kind() == reflect.Interface {
+		return "<nil>"
+	}
+	return k.Type().String()
 }
 
 func (st *formatState) formatList(b *strings.Builder, rv reflect.Value) {
