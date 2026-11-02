@@ -46,6 +46,10 @@ type Program struct {
 	// noOptimize disables folding and fast paths (see
 	// withoutOptimizations).
 	noOptimize bool
+
+	// deferred, when set, holds source and identifiers for a Program
+	// made by sub, computed on first use.
+	deferred *deferredInfo
 }
 
 // compile walks the root AST once to populate the lookup caches used
@@ -250,7 +254,10 @@ func applyUnary(op token.Token, v any) (any, error) {
 var _ runner = (*Program)(nil)
 
 // Source returns the original expression text.
-func (p *Program) Source() string { return p.source }
+func (p *Program) Source() string {
+	source, _ := p.resolveDeferred()
+	return source
+}
 
 // Run evaluates the program against env. env may be a map[string]any, a
 // struct, or a pointer to a struct — identifier lookups resolve to map

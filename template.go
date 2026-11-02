@@ -284,7 +284,10 @@ func formatTemplateValue(v any) string {
 	case string:
 		return x
 	}
-	if isCompositeKind(v) {
+	// encoding/json has no depth or work bound; a value outside the
+	// formatting bounds renders through safeFormatValue, which marks
+	// where it stopped.
+	if isCompositeKind(v) && jsonWithinBounds(v) {
 		if s, ok := marshalTemplateJSON(v); ok {
 			return s
 		}
@@ -295,13 +298,9 @@ func formatTemplateValue(v any) string {
 // isCompositeKind reports whether v is a map, slice, array, or struct
 // (following pointers), the shapes that render as JSON in templates.
 func isCompositeKind(v any) bool {
-	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return false
-		}
-		rv = rv.Elem()
-	}
+	// unwrapReceiver bounds the pointer walk, so a self-referential
+	// pointer type cannot loop here.
+	rv, _ := unwrapReceiver(reflect.ValueOf(v))
 	switch rv.Kind() {
 	case reflect.Map, reflect.Slice, reflect.Array, reflect.Struct:
 		return true

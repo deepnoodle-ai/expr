@@ -877,6 +877,31 @@ The following are hard limits:
   (`map(xs, map(xs, map(xs, it)))` is `len(xs)³` predicate
   evaluations from a ~30-byte expression). The default is unlimited.
 
+Compilation, evaluation and formatting are bounded separately:
+
+- **Compile** (`Compile`, `Check`, `Identifiers`, `Calls`): the source
+  length bounds the parser, the rewrites and every walk of the syntax
+  tree. Each of them takes time and memory near-linear in the source,
+  so a maximal source compiles in well under a second. Error messages
+  quote a higher-order predicate only when it is small (64 syntax
+  nodes or fewer), so an error passing through deeply nested forms
+  does not print the expression again at each level. `Calls` prints an
+  argument's `Source` only when it is asked for.
+- **Run**: `MaxEvalDepth` bounds recursion and `WithEvalBudget` bounds
+  work. Unwrapping pointers stops after 64 levels, so a
+  self-referential pointer type fails as an unsupported receiver
+  instead of looping.
+- **Formatting** (`string(v)`, `sprintf`, template rendering): host
+  values can be cyclic, deeply nested or share structure, and
+  formatting cannot fail, so the bounds show up in the text. A
+  reference already being rendered higher up prints `<cycle>`
+  (including through map keys); nesting deeper than 1000 levels prints
+  `<...>`; after 2^20 values the rest prints `<truncated>`. Structure
+  shared without a cycle (a list holding the same list twice, nested
+  64 times) would otherwise take time exponential in the value's size.
+  Templates render composites as JSON only within the same bounds and
+  fall back to this formatting outside them.
+
 Under adversarial input, expr must never:
 
 - Panic (nil-deref, slice bounds, reflection on invalid values).
@@ -885,6 +910,11 @@ Under adversarial input, expr must never:
 - Expose unexported struct fields.
 
 See `FuzzCompile` and `FuzzEval` for the enforcing test targets.
+`TestIsolatedCrashRegressions` runs each crash-shaped case (cyclic,
+deep and shared values through every formatter and evaluator path;
+maximal sources through Compile, Check and Run) in a child process
+with a 64 MiB stack, so a regression into unbounded recursion fails
+one case instead of killing the test run.
 
 ## Cancellation and termination guarantees
 

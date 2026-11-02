@@ -32,8 +32,9 @@ import (
 // a host deliberately shadows it. Every name that can only resolve
 // through the env is always included.
 func (p *Program) Identifiers() []string {
-	out := make([]string, len(p.identifiers))
-	copy(out, p.identifiers)
+	_, identifiers := p.resolveDeferred()
+	out := make([]string, len(identifiers))
+	copy(out, identifiers)
 	return out
 }
 

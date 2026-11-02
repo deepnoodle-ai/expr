@@ -271,6 +271,12 @@ func wrapPredicateErr(name string, predicate ast.Expr, index int, err error) err
 // a backtick (which would clash with the surrounding error format),
 // letting wrapPredicateErr fall back to a position-only message.
 func formatPredicate(node ast.Expr) string {
+	// A large predicate is left out of the message: printing it costs
+	// time in its size at every enclosing form an error passes through,
+	// which is quadratic for deeply nested forms.
+	if !astWithin(node, maxPredicateDisplayNodes) {
+		return ""
+	}
 	out := exprDisplayString(node)
 	if out == "" || strings.ContainsRune(out, '`') {
 		return ""
@@ -280,6 +286,24 @@ func formatPredicate(node ast.Expr) string {
 
 // exprDisplayString prints node via go/printer after rewriting it
 // into user-facing display form. Returns "" when printing fails.
+// maxPredicateDisplayNodes is the largest predicate, in AST nodes, that
+// an error message quotes.
+const maxPredicateDisplayNodes = 64
+
+// astWithin reports whether node has at most limit AST nodes, visiting
+// at most about limit of them.
+func astWithin(node ast.Node, limit int) bool {
+	n := 0
+	ast.Inspect(node, func(x ast.Node) bool {
+		if x == nil || n > limit {
+			return false
+		}
+		n++
+		return true
+	})
+	return n <= limit
+}
+
 func exprDisplayString(node ast.Expr) string {
 	var buf bytes.Buffer
 	if err := printer.Fprint(&buf, token.NewFileSet(), displayExpr(node)); err != nil {
