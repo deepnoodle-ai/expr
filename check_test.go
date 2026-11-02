@@ -385,14 +385,14 @@ func TestCheckMatchesRun(t *testing.T) {
 		// Soundness harness finds: a computed key may name any field,
 		// and the value of an operation that always fails, or of a list
 		// that is always empty, is not unknown.
-		`{"bob": 1, k: c}.x`:              `field "x" may be absent; use ?.`,
-		`first(nil).a`:                    "the value is always nil",
-		`-find(nil, it)`:                  "nil is not a number",
-		`-try(xs[nil], "s")`:              `"s" is not a number`,
-		`first(flatMap(xs, 0)).b`:         `cannot read field "b"`,
-		`round(last(filter(nil, it)))`:    "argument 1 is always nil",
-		`lower({}?[k])`:                   "argument 1 is always nil",
-		`2.5?[nil]`:                       "cannot index 2.5",
+		`{"bob": 1, k: c}.x`:           `field "x" may be absent; use ?.`,
+		`first(nil).a`:                 "the value is always nil",
+		`-find(nil, it)`:               "nil is not a number",
+		`-try(xs[nil], "s")`:           `"s" is not a number`,
+		`first(flatMap(xs, 0)).b`:      `cannot read field "b"`,
+		`round(last(filter(nil, it)))`: "argument 1 is always nil",
+		`lower({}?[k])`:                "argument 1 is always nil",
+		`2.5?[nil]`:                    "cannot index 2.5",
 		// The items of a list joined with [] are still checked.
 		`any(xn || [], it.nope == 1)`:         `no field "nope"`,
 		`any(coalesce(xn, []), it.nope == 1)`: `no field "nope"`,
