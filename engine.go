@@ -50,10 +50,12 @@ import (
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"sort"
 	"strings"
 
 	"github.com/deepnoodle-ai/expr/internal/jsonlit"
 	"github.com/deepnoodle-ai/expr/internal/optaccess"
+	"github.com/deepnoodle-ai/expr/internal/srcedit"
 )
 
 // ErrCompile wraps parse failures so callers can match with errors.Is.
@@ -221,6 +223,42 @@ func Compile(code string, opts ...Option) (*Program, error) {
 // set. NewTemplate uses it to compile every `${...}` segment without
 // re-applying the option closures per segment (and without tripping
 // the template-only option check that guards Compile).
+//
+// # Compile pipeline
+//
+// Source passes through four token-level rewrites before go/parser sees
+// it, then three tree passes. Each rewrite scans with go/scanner (so the
+// contents of strings, runes and comments are never touched), plans
+// splices with internal/srcedit, and returns a map from its output
+// offsets back to its input, so errors report the position the user
+// wrote. The stages, in order:
+//
+//  1. rewriteKeywordFields — input: user source. Renames a Go keyword
+//     that follows a `.` (`x.type`, `x.map`) to __expr_kw_<name>. It
+//     skips the `.` of `?.`, whose field optaccess quotes instead.
+//     Output: no keyword follows a plain `.`.
+//  2. optaccess.RewriteMap — input may contain `?.f` / `?[i]` (f may be
+//     a keyword) and __expr_kw_ fields. Emits __try_select__(lhs, "f")
+//     and __try_index__(lhs, i), finding lhs by walking back over
+//     identifiers, selector chains, balanced brackets, calls (including
+//     `map(`/`if(`, still keywords here), bare [..] / {..} literals and
+//     typed []T{} / [N]T{} / map[K]V{} literals. Output: no `?.`/`?[`
+//     left except ones it declined (which the parser rejects).
+//  3. jsonlit.RewriteMap — input: may contain __try_* calls and the
+//     `map`/`if` keywords. Rewrites bare `[..]` to []any{..} and bare
+//     `{..}` to map[string]any{..}, leaving index brackets, typed
+//     literals and type expressions alone. It relies on stage 2 having
+//     removed `?`, so a `[` after `?` never reaches it.
+//  4. preprocessSource — input: may contain map[string]any{ from stage
+//  3. Renames the `map` keyword (except `map[`, a map type) and `if`
+//     to the sentinels __expr_map__ and __expr_if__. Output: valid Go
+//     expression syntax for every accepted form.
+//
+// After parsing: restoreKeywordFields gives __expr_kw_ selectors their
+// real names; desugarPipes turns `a | f(x)` into f(a, x), so later
+// passes see only calls; validate rejects Go syntax expr does not
+// support. The evaluator dispatches the sentinels as special forms and
+// displayIdent shows their user-visible names in errors.
 func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 	if len(code) > MaxSourceLength {
 		return nil, fmt.Errorf("%w: source length %d exceeds maximum %d",
@@ -229,27 +267,23 @@ func compileWithConfig(code string, cfg *compileConfig) (*Program, error) {
 	if len(cfg.errs) > 0 {
 		return nil, fmt.Errorf("%w: %w", ErrCompile, errors.Join(cfg.errs...))
 	}
-	// Pipeline order: rewriteKeywordFields renames keyword field names
-	// (`x.type`) first, so the later rewrites see an identifier there;
-	// optaccess turns `?.`/`?[` into sentinel calls while the source
-	// still uses raw operator syntax; jsonlit then rewrites bare
-	// composite literals; preprocessSource handles the keyword rewrites
-	// (`map`) so the parser accepts them as identifiers.
-	parsed := preprocessSource(jsonlit.Rewrite(optaccess.Rewrite(rewriteKeywordFields(code))))
+	parsed, srcMap := rewriteSource(code)
 	fset := token.NewFileSet()
 	node, err := parser.ParseExprFrom(fset, "", parsed, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCompile, err)
+		return nil, fmt.Errorf("%w: %v", ErrCompile, sourceErrors(err, code, srcMap))
 	}
-	restoreKeywordFields(node)
-	// Desugar pipe expressions (`a | f(x)` → `f(a, x)`) before
-	// validation so validate and the evaluator only ever see ordinary
-	// call nodes. See pipe.go.
-	node, err = desugarPipes(fset, node)
+	node, err = checkTree(fset, node)
+	if err != nil && !srcMap.Identity() {
+		// The passes report positions through fset. Point them at code
+		// and run them again on a fresh tree, so a successful compile
+		// pays nothing for the translation.
+		fset = token.NewFileSet()
+		node, _ = parser.ParseExprFrom(fset, "", parsed, 0)
+		mapPositions(fset.File(node.Pos()), code, srcMap)
+		_, err = checkTree(fset, node)
+	}
 	if err != nil {
-		return nil, err
-	}
-	if err := validate(fset, node); err != nil {
 		return nil, err
 	}
 	p := &Program{
@@ -293,17 +327,86 @@ const (
 	tryIndexFormName  = "__try_index__"
 )
 
+// checkTree runs the tree passes of the compile pipeline on a freshly
+// parsed node: keyword field names, pipes, validation.
+func checkTree(fset *token.FileSet, node ast.Expr) (ast.Expr, error) {
+	restoreKeywordFields(node)
+	// Desugar pipe expressions (`a | f(x)` → `f(a, x)`) before
+	// validation so validate and the evaluator only ever see ordinary
+	// call nodes. See pipe.go.
+	node, err := desugarPipes(fset, node)
+	if err != nil {
+		return nil, err
+	}
+	if err := validate(fset, node); err != nil {
+		return nil, err
+	}
+	return node, nil
+}
+
+// rewriteSource runs the token-level rewrites of the compile pipeline
+// (see compileWithConfig) and returns the parser's input with the map
+// from its offsets back to code.
+func rewriteSource(code string) (string, srcedit.Map) {
+	s1, m1 := rewriteKeywordFields(code)
+	s2, m2 := optaccess.RewriteMap(s1)
+	s3, m3 := jsonlit.RewriteMap(s2)
+	s4, m4 := preprocessSource(s3)
+	return s4, m4.Then(m3).Then(m2).Then(m1)
+}
+
+// sourceErrors moves the positions in a parse error from the rewritten
+// source to code.
+func sourceErrors(err error, code string, m srcedit.Map) error {
+	list, ok := err.(scanner.ErrorList)
+	if !ok {
+		return err
+	}
+	lines := lineStarts(code)
+	out := make(scanner.ErrorList, len(list))
+	for i, e := range list {
+		c := *e
+		c.Pos.Offset, c.Pos.Line, c.Pos.Column = sourcePosition(lines, len(code), m.Orig(e.Pos.Offset))
+		out[i] = &c
+	}
+	return out
+}
+
+// mapPositions records on file, at the start of each rewritten segment,
+// the line and column in code that it came from, so fset.Position
+// reports positions in code.
+func mapPositions(file *token.File, code string, m srcedit.Map) {
+	lines := lineStarts(code)
+	m.Segments(func(out, in int, _ bool) {
+		_, line, col := sourcePosition(lines, len(code), in)
+		file.AddLineColumnInfo(out, "", line, col)
+	})
+}
+
+// lineStarts returns the offset of the start of each line of code.
+func lineStarts(code string) []int {
+	lines := []int{0}
+	for i := 0; i < len(code); i++ {
+		if code[i] == '\n' {
+			lines = append(lines, i+1)
+		}
+	}
+	return lines
+}
+
+// sourcePosition is the offset (clamped to the source), 1-based line and
+// 1-based byte column of off.
+func sourcePosition(lines []int, size, off int) (offset, line, col int) {
+	off = max(0, min(off, size))
+	i := sort.SearchInts(lines, off+1) - 1
+	return off, i + 1, off - lines[i] + 1
+}
+
 // keywordRewrites lists the Go keyword tokens that expr accepts as
-// ordinary identifiers. Each entry maps the source spelling to its
-// internal sentinel; preprocessSource walks tokens and substitutes
-// occurrences in place.
-var keywordRewrites = []struct {
-	tok      token.Token
-	src      string
-	internal string
-}{
-	{token.MAP, "map", mapFormName},
-	{token.IF, "if", ifFuncName},
+// ordinary identifiers, with the internal sentinel each becomes.
+var keywordRewrites = map[token.Token]string{
+	token.MAP: mapFormName,
+	token.IF:  ifFuncName,
 }
 
 // preprocessSource rewrites Go keyword tokens that expr wants to
@@ -320,54 +423,28 @@ var keywordRewrites = []struct {
 // silently turned into a meaningless call. `if` has no analogous
 // safe context inside expr expressions, so every `if` token is
 // rewritten unconditionally.
-func preprocessSource(src string) string {
+func preprocessSource(src string) (string, srcedit.Map) {
 	// Fast path: skip the scanner unless the source mentions one of
 	// the rewritable keywords. Substring checks on short inputs are
 	// much cheaper than spinning up go/scanner.
-	if !containsAnyRewriteKeyword(src) {
-		return src
+	if !strings.Contains(src, "map") && !strings.Contains(src, "if") {
+		return src, srcedit.Map{}
 	}
-	fs := token.NewFileSet()
-	file := fs.AddFile("expr", fs.Base(), len(src))
-	var s scanner.Scanner
-	s.Init(file, []byte(src), nil, 0)
-
-	type tokInfo struct {
-		pos token.Pos
-		tok token.Token
-	}
-	var toks []tokInfo
-	for {
-		pos, tok, _ := s.Scan()
-		if tok == token.EOF {
-			break
-		}
-		toks = append(toks, tokInfo{pos, tok})
-	}
-
-	var out strings.Builder
-	out.Grow(len(src) + 16)
-	last := 0
-	for i := 0; i < len(toks); i++ {
-		rule, ok := matchRewrite(toks[i].tok)
+	toks := srcedit.Scan(src)
+	var edits []srcedit.Edit
+	for i, t := range toks {
+		internal, ok := keywordRewrites[t.Kind]
 		if !ok {
 			continue
 		}
 		// Leave `map[...]` alone so Go map type literals continue to
 		// produce a normal "unsupported syntax" error at eval time.
-		if rule.tok == token.MAP && i+1 < len(toks) && toks[i+1].tok == token.LBRACK {
+		if t.Kind == token.MAP && i+1 < len(toks) && toks[i+1].Kind == token.LBRACK {
 			continue
 		}
-		off := file.Offset(toks[i].pos)
-		out.WriteString(src[last:off])
-		out.WriteString(rule.internal)
-		last = off + len(rule.src)
+		edits = append(edits, srcedit.Edit{Pos: t.Pos, End: t.End, Str: internal})
 	}
-	if last == 0 {
-		return src
-	}
-	out.WriteString(src[last:])
-	return out.String()
+	return srcedit.Apply(src, edits)
 }
 
 // keywordFieldPrefix marks a field name that is a Go keyword. Go's parser
@@ -379,38 +456,56 @@ const keywordFieldPrefix = "__expr_kw_"
 // rewriteKeywordFields renames every Go keyword that directly follows a
 // `.` (`event.type`, `item.range`, `x.map`) so the expression parses. It
 // leaves `?.type` alone: optaccess puts that name in a string literal.
-func rewriteKeywordFields(src string) string {
-	if !strings.Contains(src, ".") {
-		return src
+func rewriteKeywordFields(src string) (string, srcedit.Map) {
+	if !mayHaveKeywordField(src) {
+		return src, srcedit.Map{}
 	}
-	fs := token.NewFileSet()
-	file := fs.AddFile("expr", fs.Base(), len(src))
-	var s scanner.Scanner
-	s.Init(file, []byte(src), nil, 0)
-	var out strings.Builder
-	last := 0
-	// period is set when the previous token is a `.` that is not part
-	// of `?.`.
-	period, question := false, false
-	for {
-		pos, tok, lit := s.Scan()
-		if tok == token.EOF {
+	toks := srcedit.Scan(src)
+	var edits []srcedit.Edit
+	for i := 1; i < len(toks); i++ {
+		t, prev := toks[i], toks[i-1]
+		if !t.Kind.IsKeyword() || prev.Kind != token.PERIOD {
+			continue
+		}
+		if i >= 2 && toks[i-2].Kind == token.ILLEGAL && toks[i-2].Lit == "?" {
+			continue
+		}
+		edits = append(edits, srcedit.Edit{Pos: t.Pos, End: t.End, Str: keywordFieldPrefix + t.Lit})
+	}
+	return srcedit.Apply(src, edits)
+}
+
+// mayHaveKeywordField is a cheap pre-check for rewriteKeywordFields: it
+// reports whether some `.` is followed, after spaces, by a word that is a
+// Go keyword, or whether src has a comment (which may sit between the two).
+// A false positive only costs a scan.
+func mayHaveKeywordField(src string) bool {
+	if strings.Contains(src, "/") {
+		return strings.Contains(src, ".")
+	}
+	for i := strings.IndexByte(src, '.'); i >= 0; {
+		j := i + 1
+		for j < len(src) && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r') {
+			j++
+		}
+		k := j
+		for k < len(src) && 'a' <= src[k] && src[k] <= 'z' {
+			k++
+		}
+		if k > j && token.Lookup(src[j:k]).IsKeyword() && (k == len(src) || !isIdentByte(src[k])) {
+			return true
+		}
+		next := strings.IndexByte(src[i+1:], '.')
+		if next < 0 {
 			break
 		}
-		if period && tok.IsKeyword() {
-			off := file.Offset(pos)
-			out.WriteString(src[last:off])
-			out.WriteString(keywordFieldPrefix + lit)
-			last = off + len(lit)
-		}
-		period = tok == token.PERIOD && !question
-		question = tok == token.ILLEGAL && lit == "?"
+		i += 1 + next
 	}
-	if last == 0 {
-		return src
-	}
-	out.WriteString(src[last:])
-	return out.String()
+	return false
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || c >= 0x80
 }
 
 // restoreKeywordFields undoes rewriteKeywordFields on the parsed tree.
@@ -424,32 +519,6 @@ func restoreKeywordFields(node ast.Node) {
 		}
 		return true
 	})
-}
-
-func containsAnyRewriteKeyword(src string) bool {
-	for _, r := range keywordRewrites {
-		if strings.Contains(src, r.src) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchRewrite(tok token.Token) (struct {
-	tok      token.Token
-	src      string
-	internal string
-}, bool) {
-	for _, r := range keywordRewrites {
-		if r.tok == tok {
-			return r, true
-		}
-	}
-	return struct {
-		tok      token.Token
-		src      string
-		internal string
-	}{}, false
 }
 
 // displayIdent converts an internal rewritten identifier back to the

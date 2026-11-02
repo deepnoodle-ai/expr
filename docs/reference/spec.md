@@ -892,6 +892,10 @@ The following are hard limits:
   do not stop nested higher-order forms from multiplying work
   (`map(xs, map(xs, map(xs, it)))` is `len(xs)³` predicate
   evaluations from a ~30-byte expression). The default is unlimited.
+- **Compile cost**: `Compile` and `NewTemplate` run in time and memory
+  about linear in the source length, whatever its shape (deeply nested
+  literals, long `?.` chains, many template segments). The source
+  rewrites expand their input by at most a constant factor.
 
 Compilation, evaluation and formatting are bounded separately:
 
@@ -1233,7 +1237,11 @@ for _, c := range p.Calls("ask") {
 ## Error model
 
 All runtime failures wrap `ErrEvaluate`; all parse failures wrap
-`ErrCompile`. Callers check with `errors.Is(err, ErrEvaluate)` /
+`ErrCompile`. A compile error names the 1-based `line:column` of the
+problem in the source as written: expr rewrites JSON literals, `?.`/`?[`,
+keyword fields and `map`/`if` before parsing, but positions are mapped back
+through those rewrites. In a template, the position is within the
+`${...}` body. Callers check with `errors.Is(err, ErrEvaluate)` /
 `errors.Is(err, ErrCompile)`. Errors returned by host functions — the
 error of a `(T, error)` signature, including a non-pointer error value,
 and the error of a `Func` — are wrapped such that both `errors.Is` and
