@@ -820,8 +820,24 @@ in `Absent`, so `if(c, {"x": 1}, {}).x` is reported and
 `if(c, {"x": 1}, {})?.x` types as `1?`. In an object literal, a key that
 is not a literal may replace any field listed before it, so in
 `{"x": 1, k: "s"}` the field `x` types as `1 | "s"`; a literal key after it
-sets the field's type outright. `slice` of a union of a string and a list
-types as the union of a string and a list.
+sets the field's type outright. Such a key may also name a field not
+listed, so the object is open with the key's value as the type of its
+unlisted fields, which may be absent: `{"x": 1, k: "s"}?.y` types as
+`"s"?`, and `.y` is reported. A key typed as an enum instead adds each of
+its values as a field that may be absent. `slice` of a union of a string
+and a list types as the union of a string and a list.
+
+The rule behind these types: the type Check infers includes every value
+Run can produce from inputs the env types allow — each value that may be
+nil, each member of a union, and each field a computed key may replace. A
+value that is always nil is typed as nil, not left unchecked: `first`,
+`last` and `find` of a nil or empty list (`find(nil, ...)`,
+`first(filter(nil, ...))`), and `o?[k]` on an object with no fields. An
+operation that always fails (indexing with nil) produces no value, so in
+`try(xs[nil], "s")` the result types as `"s"`. `flatMap` adds a list
+body's elements and any other non-nil body as one element, so
+`flatMap(xs, [it, "s"])` types as `list<number | "s">`. `check_soundness_test.go`
+checks the rule against generated schemas, values and expressions.
 `==` and `!=` on lists or objects are reported, since Run rejects them.
 
 `Any` disables checking for the value and everything derived from it, so a

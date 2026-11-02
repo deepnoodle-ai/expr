@@ -103,3 +103,73 @@ func TestCheckRegressionSliceUnion(t *testing.T) {
 		require.ErrorIs(t, err, ErrType)
 	})
 }
+
+// Cases the soundness harness (check_soundness_test.go) found. Each pairs
+// a schema with a value Run accepts and the type Check must now infer
+// for it, or with a value on which Run fails and the problem Check must
+// now report.
+func TestCheckRegressionSoundness(t *testing.T) {
+	funcs := []Option{WithBuiltins(), WithFunctions(StringFuncs()), WithFunctions(MathFuncs()), WithFunctions(CollectionFuncs())}
+	for _, tc := range []struct {
+		name   string
+		src    string
+		schema map[string]*Type
+		value  map[string]any
+		// want is the inferred type when Run succeeds, or a substring of
+		// the Check problem when Run fails.
+		want string
+	}{
+		{"computed key types unlisted fields", `{"a": 2, k: c}?.b`,
+			map[string]*Type{"k": String(), "c": Bool()}, map[string]any{"k": "b", "c": true}, "bool?"},
+		{"computed key field may be absent", `{"a": 2, k: c}.b`,
+			map[string]*Type{"k": String(), "c": Bool()}, map[string]any{"k": "a", "c": true}, `field "b" may be absent`},
+		{"enum key adds absent fields", `{k: 1}?.b`,
+			map[string]*Type{"k": EnumOf("a", "b")}, map[string]any{"k": "b"}, "1?"},
+		{"enum key field may be absent", `{k: 1}.b`,
+			map[string]*Type{"k": EnumOf("a", "b")}, map[string]any{"k": "a"}, `field "b" may be absent`},
+		{"literal key after computed key is present", `{k: 1, "b": "s"}.b`,
+			map[string]*Type{"k": EnumOf("a", "b")}, map[string]any{"k": "b"}, `"s"`},
+		{"computed key indexed by any string", `{"a": c, k: y}[trim(k)].type`,
+			map[string]*Type{"k": String(), "c": Bool(), "y": String()}, map[string]any{"k": "a", "c": true, "y": ""}, "the key may be absent"},
+		{"first of nil", `first(x).a`,
+			map[string]*Type{"x": Null()}, map[string]any{"x": nil}, "the value is always nil"},
+		{"find over nil", `-find(x, it)`,
+			map[string]*Type{"x": Null()}, map[string]any{"x": nil}, "nil is not a number"},
+		{"find over a nil form result", `find(map(x, it), true).type`,
+			map[string]*Type{"x": Null()}, map[string]any{"x": nil}, "the value is always nil"},
+		{"last of an empty list", `round(last(filter(nil, it)))`,
+			nil, nil, "argument 1 is always nil"},
+		{"sort of nil", `-sort(nil)?[0]`,
+			nil, nil, "nil is not a number"},
+		{"try of a nil index", `-try(x[nil], y)`,
+			map[string]*Type{"x": ListOf(Number()), "y": String()}, map[string]any{"x": []any{1}, "y": "s"}, "is not a number"},
+		{"try of a nil index types as its default", `try(x[nil], y)`,
+			map[string]*Type{"x": ListOf(Number()), "y": String()}, map[string]any{"x": []any{1}, "y": "s"}, "string"},
+		{"?[nil] of a nil receiver is nil", `try(x?[nil], 1)`,
+			map[string]*Type{"x": ListOf(Number()).OrNil()}, map[string]any{"x": nil}, "1?"},
+		{"nil index of a number", `2.5?[z]`,
+			map[string]*Type{"z": Null(), "k": String()}, map[string]any{"z": nil, "k": "a"}, "cannot index 2.5"},
+		{"flatMap of a non-list body", `first(flatMap(x, 0)).b`,
+			map[string]*Type{"x": ListOf(Number())}, map[string]any{"x": []any{1}}, `cannot read field "b"`},
+		{"flatMap of a union body", `sum(flatMap(z, it))`,
+			map[string]*Type{"z": ListOf(Join(Number(), ObjectOf(map[string]*Type{"a": String()})))},
+			map[string]any{"z": []any{1, map[string]any{"a": ""}}}, "elements that may be"},
+		{"index of an empty object", `lower(o?[k])`,
+			map[string]*Type{"o": ObjectOf(map[string]*Type{}), "k": String()}, map[string]any{"o": map[string]any{}, "k": "a"}, "argument 1 is always nil"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Compile(tc.src, funcs...)
+			require.NoError(t, err)
+			got, runErr := p.Run(context.Background(), tc.value)
+			typ, checkErr := p.Check(tc.schema)
+			if runErr != nil {
+				require.ErrorIs(t, checkErr, ErrType, "Run failed, so Check must report it")
+				require.Contains(t, checkErr.Error(), tc.want)
+				return
+			}
+			require.NoError(t, checkErr)
+			require.Equal(t, tc.want, typ.String())
+			_ = got
+		})
+	}
+}

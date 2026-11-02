@@ -429,10 +429,13 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 	case recv.isAny():
 		return Any
 	case recv.Kind == KindNull:
-		if !optional && c.lenient == 0 {
+		if optional {
+			return Null()
+		}
+		if c.lenient == 0 {
 			c.report(n, "the value is always nil")
 		}
-		return Null()
+		return never
 	}
 	if !optional {
 		c.nilCheck(recvNode, recv)
@@ -494,20 +497,30 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 		return Any
 	}
 	if recv.Kind == KindNull {
-		if !optional && c.lenient == 0 {
+		if optional {
+			return Null()
+		}
+		if c.lenient == 0 {
 			c.report(n, "the value is always nil")
 		}
-		return Null()
+		return never
 	}
 	if !optional {
 		c.nilCheck(recvNode, recv)
 	}
 	// A nil index fails even after ?[.
 	if idx.Kind == KindNull {
-		if c.lenient == 0 {
+		switch {
+		case recv.Kind != KindList && recv.Kind != KindString && recv.Kind != KindObject:
+			c.report(n, "cannot index %s", recv)
+		case c.lenient == 0:
 			c.report(idxNode, "the index is always nil")
 		}
-		return Any
+		if optional && recv.Optional {
+			// ?[ gives nil for a nil receiver without reading the index.
+			return Null()
+		}
+		return never
 	}
 	c.nilCheck(idxNode, idx)
 	if !c.oneKind(idxNode, idx) {
@@ -518,6 +531,14 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 	case KindList, KindString:
 		what := "list"
 		out = recv.Elem
+		if out == empty {
+			// The list is always empty: [i] is out of range and ?[i]
+			// is nil.
+			out = never
+			if optional {
+				out = Null()
+			}
+		}
 		if recv.Kind == KindString {
 			what, out = "string", String()
 		}
@@ -555,6 +576,13 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 		}
 		if recv.Open {
 			out = Join(out, recv.Elem)
+		}
+		if out == nil {
+			// A closed object with no fields: every key is absent.
+			if optional {
+				return Null()
+			}
+			return never
 		}
 	default:
 		c.report(n, "cannot index %s", recv)
@@ -728,16 +756,23 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 	for k, v := range hidden {
 		c.narrowed[k] = v
 	}
+	if ct.Kind == KindNull || ct.Kind == KindList && ct.Elem == empty {
+		// The body never runs: the list is empty, or nil, which
+		// iterates as an empty list.
+		switch form {
+		case "find":
+			return Null()
+		case "map", "filter", "sortBy", "flatMap":
+			return ListOf(empty)
+		}
+	}
 	switch form {
 	case "map":
 		return ListOf(bt)
 	case "filter", "sortBy":
 		return ListOf(elem)
 	case "flatMap":
-		if bt.Kind == KindList {
-			return ListOf(bt.Elem)
-		}
-		return ListOf(Any)
+		return ListOf(flatElem(bt))
 	case "any", "all":
 		return Bool()
 	case "find":
@@ -746,6 +781,30 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 		return Number()
 	}
 	return Any
+}
+
+// flatElem is the element type of flatMap's result for a body of type bt:
+// a list body adds its elements, nil adds nothing, and any other value is
+// added as one element.
+func flatElem(bt *Type) *Type {
+	if bt.isAny() {
+		return Any
+	}
+	var out *Type
+	for _, v := range variants(bt.NonNil()) {
+		switch {
+		case v.Kind == KindNull:
+		case v.Kind == KindList && v.Elem == empty:
+		case v.Kind == KindList:
+			out = Join(out, orAny(v.Elem))
+		default:
+			out = Join(out, v)
+		}
+	}
+	if out == nil {
+		return empty
+	}
+	return out
 }
 
 // mentions reports whether the source text src refers to the name as an
@@ -792,9 +851,9 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			// field has exactly the value's type.
 			if key, ok := literalString(kt); ok && !kt.Optional {
 				out.Fields[key] = vt
+				delete(out.Absent, key)
 				continue
 			}
-			out.Open = true
 			switch {
 			case kt.Kind == KindNull:
 				c.report(kv.Key, "an object key is always nil")
@@ -804,19 +863,52 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			default:
 				c.nilCheck(kv.Key, kt)
 			}
-			// A computed key may replace any field listed so far (only
-			// those in its enum, if it has one), so each such field may
-			// hold either type.
-			for name, ft := range out.Fields {
-				if kt.Kind == KindString && len(kt.Enum) > 0 && !kt.hasEnumValue(name) {
-					continue
-				}
-				out.Fields[name] = Join(orAny(ft), orAny(vt))
-			}
+			c.computedKey(out, kt, orAny(vt))
 		}
 		return out
 	}
 	return Any
+}
+
+// computedKey adds to out, an object literal's type so far, an entry
+// whose key is not a literal. The key may replace any field listed so far
+// (only those in its enum, if it has one), so each such field may hold
+// either type. A key from an enum adds each value of the enum as a field
+// that may be absent; any other key may name any field, so the object is
+// open and its unlisted fields, which may be absent, have the value's
+// type.
+func (c *checker) computedKey(out *Type, kt, vt *Type) {
+	enum := kt.Kind == KindString && len(kt.Enum) > 0
+	for name, ft := range out.Fields {
+		if enum && !kt.hasEnumValue(name) {
+			continue
+		}
+		out.Fields[name] = Join(orAny(ft), vt)
+	}
+	if !enum {
+		if out.Open {
+			out.Elem = Join(orAny(out.Elem), vt)
+		} else {
+			out.Open, out.Elem = true, vt
+		}
+		return
+	}
+	for _, v := range kt.Enum {
+		name, _ := v.(string)
+		if _, ok := out.Fields[name]; ok {
+			continue
+		}
+		field := vt
+		if out.Open {
+			// The key may also hold an earlier computed key's value.
+			field = Join(orAny(out.Elem), vt)
+		}
+		out.Fields[name] = field
+		if out.Absent == nil {
+			out.Absent = map[string]bool{}
+		}
+		out.Absent[name] = true
+	}
 }
 
 func literalString(t *Type) (string, bool) {
@@ -1021,17 +1113,29 @@ func entriesType(a []*Type) *Type {
 	return ListOf(ObjectOf(map[string]*Type{"key": String(), "value": value}))
 }
 
+// elemOrNil is the result of first and last: an element, or nil for an
+// empty or nil list.
 func elemOrNil(a []*Type) *Type {
-	if len(a) == 1 && a[0].Kind == KindList {
+	switch {
+	case len(a) != 1:
+		return Any
+	case a[0].Kind == KindList && a[0].Elem == empty:
+		return Null() // the list is always empty
+	case a[0].Kind == KindList:
 		return orAny(a[0].Elem).OrNil()
+	case a[0].Kind == KindNull:
+		return Null()
 	}
 	return Any
 }
 
 // listType is the result of sort and reverse: a new list, empty for nil.
 func listType(a []*Type) *Type {
-	if len(a) == 1 && a[0].Kind == KindList {
+	switch {
+	case len(a) == 1 && a[0].Kind == KindList:
 		return ListOf(orAny(a[0].Elem))
+	case len(a) == 1 && a[0].Kind == KindNull:
+		return ListOf(empty)
 	}
 	return ListOf(Any)
 }
