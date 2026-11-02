@@ -90,7 +90,10 @@ Compile time with `ErrCompile`.
 
 - String vs string uses `strings` comparison.
 - Numeric comparisons work across any combination of integer kinds and
-  floats (see [Equality](#equality)).
+  floats (see [Equality](#equality)). Two integers compare exactly,
+  whatever their width or signedness, so `uint64` values above
+  `MaxInt64` order correctly; an integer and a float compare as
+  `float64`.
 - Other comparable Go types use native equality when both sides are the
   same type. Mismatched-but-comparable types yield `false` without an
   error. Uncomparable types (slices, maps, funcs) return `ErrEvaluate`.
@@ -204,12 +207,17 @@ accessing a field on a piped result is written
 2. `X == nil` is `true` if `X` is a typed nil value of a nilable kind
    (chan, func, interface, map, pointer, slice). This means a `(*T)(nil)`
    or `[]any(nil)` stored in `any` compares equal to the literal `nil`.
-3. If both sides are any combination of integer or float kinds, they
-   convert to `float64` and compare. `int32(7) == int64(7) == float64(7)`
-   is `true`.
-4. Otherwise: if both runtime types are comparable, Go's `==` is used.
-   Different types compare as `false` (no error). Uncomparable types
-   return `ErrEvaluate`.
+3. If both sides are integers of any width or signedness (including
+   named integer types), they compare exactly: a value above 2^53 is
+   not rounded, and `uint64(18446744073709551615)` equals nothing but
+   itself. If either side is a float, both convert to `float64` and
+   compare. `int32(7) == int64(7) == float64(7)` is `true`.
+4. Otherwise: if both values are comparable, Go's `==` is used.
+   Different types compare as `false` (no error). Uncomparable values
+   return `ErrEvaluate` — including a struct or array whose type is
+   comparable but which holds a slice, map or func in an interface
+   field (Go's `==` would panic on it). `contains` skips elements it
+   cannot compare.
 
 `!=` is exactly `!(==)`.
 
@@ -282,16 +290,22 @@ rather than choosing one by declaration order.
 
 ## Selectors (`x.y`)
 
-`x.y` evaluates `x`, then looks up `y` on the result:
+`x.y` evaluates `x`, then looks up `y` on the result. The rules below
+are shared by `x.y`, `x[i]` and the optional forms `x?.y` / `x?[i]`, on
+every evaluation path:
 
+- The receiver is unwrapped through pointers and interfaces at any
+  depth (`*T`, `**T`, an interface field holding a pointer). A nil met
+  along the way is a nil receiver.
 - Nil receiver → `ErrEvaluate`.
 - `map[string]any` or any map with string keys → `y` is a key. Missing
   keys return an error (not a zero value).
 - Map with non-string keys → `ErrEvaluate`.
 - Struct → the exported field `y`, using configured struct tags if any,
   or `ErrEvaluate` if missing.
-- Pointer to struct → dereferenced and re-tried. Nil pointer →
-  `ErrEvaluate`.
+- An unexported field, or a field promoted through a nil embedded
+  pointer, is not readable: the first is "not found", the second an
+  `ErrEvaluate` naming the nil pointer.
 - Anything else → `ErrEvaluate`.
 
 Selectors chain left-to-right: `a.b.c` is `(a.b).c`. Selector chains are
@@ -306,9 +320,17 @@ internal use. This applies to field names as well.
 
 ## Index expressions (`x[i]`)
 
+The receiver is unwrapped through pointers and interfaces as for
+[selectors](#selectors-xy), so a `*[3]int` indexes like a `[3]int`. A
+nil receiver → `ErrEvaluate`.
+
 - `map[string]any`: `i` must be a string. Missing key → `ErrEvaluate`.
 - Other maps: `i` is converted to the map's key type if assignable or
-  convertible. A nil index on a typed map is an error (not a panic).
+  convertible. A nil index on a typed map is an error (not a panic), as
+  is a key that cannot be hashed (`m[[1]]` on a `map[any]any`) or a
+  slice too short to convert to an array key type. An integer key type
+  takes a float only when it is integral, as slices do: `m[1.0]` reads
+  `m[1]`, `m[1.5]` is an error.
 - Slice, array: `i` must be an integer or an integer-valued float
   (`xs[1.0]` works, `xs[1.5]` is an error). Negative indices and
   indices `>= len(x)` return `ErrEvaluate` (expr does not support
@@ -363,7 +385,9 @@ before any reflect call that would panic.
   **range-checked** conversion to the declared parameter type. For
   example, `int64(10)` → `int8` succeeds; `int64(300)` → `int8` is an
   error (not a silent wraparound). Negative → unsigned fails.
-  `float64`↔`float32` is allowed and may lose precision.
+  `float64`↔`float32` is allowed and may lose precision. A float passed
+  to an integer parameter truncates toward zero, as Go's conversion
+  does, and must fit the type.
 - Nil may be passed for any nilable-kind parameter (interface, pointer,
   map, slice, chan, func). Passing nil to a non-nilable parameter is an
   error.
@@ -381,8 +405,15 @@ Supported:
   replaces the normal result.
 
 Anything else (two non-error returns, three returns, `(error, T)`)
-returns `ErrEvaluate`. Errors from functions propagate wrapped inside
-an `ErrEvaluate` chain via `errors.Is`.
+returns `ErrEvaluate` before the function is called. Errors from
+functions propagate wrapped inside an `ErrEvaluate` chain via
+`errors.Is`.
+
+Registered functions, functions stored in env or in a struct field, and
+bound methods share one call path: the same argument checks and
+conversions, the same result rules, and the same recovery of a runtime
+panic in the callee as `ErrEvaluate`. A conversion failure is reported
+before the function runs.
 
 ## Builtins
 
@@ -412,7 +443,7 @@ The standard set is:
 | Name            | Signature                       | Notes |
 | --------------- | ------------------------------- | ----- |
 | `len(v)`        | `(any) -> int, error`           | Rune count for strings, element count for slice/array/map/chan, `0` for nil, error otherwise. |
-| `string(v)`     | `(any) -> string`               | Passthrough for strings, `fmt.Sprintf("%v", v)` otherwise, `""` for nil. |
+| `string(v)`     | `(any) -> string`               | Passthrough for strings, `fmt.Sprintf("%v", v)` otherwise, `""` for nil. Map entries are ordered by rendered key, then key type, then rendered value, so the result is the same on every run. Cyclic, very deep and very large values render with markers (see [Limits and safety](#limits-and-safety)). |
 | `int(v)`        | `(any) -> int64, error`         | Numeric values convert (float truncates toward zero). Strings are parsed strictly with `strconv.ParseInt` base-10 (trimmed whitespace, no `0x`, no trailing garbage). |
 | `float(v)`      | `(any) -> float64, error`       | Like `int`, but `strconv.ParseFloat` 64-bit. |
 | `bool(v)`       | `(any) -> bool`                 | Same semantics as [truthiness](#truthiness). |
@@ -431,7 +462,7 @@ The standard set is:
 ### Registration validation
 
 `WithFunctions` entries are validated when `Compile` applies its
-options. A nil entry, a value that is not a Go function, or a function
+options. A nil entry (including a nil `Func`), a value that is not a Go function, or a function
 with an unsupported signature (more than two return values, or a
 second return that is not `error`) fails `Compile` with `ErrCompile` —
 the mistake surfaces at load time rather than on the expression's
@@ -480,7 +511,7 @@ p, err := expr.Compile(src,
 | ----------------- | ------------------------------- | ----- |
 | `first(xs)`       | `(list) -> any, error`          | First element; `nil` for nil or empty lists. |
 | `last(xs)`        | `(list) -> any, error`          | Last element; `nil` for nil or empty lists. |
-| `sum(xs)`         | `(list) -> num, error`          | Numeric sum. `int64` (overflow-checked) when every element is integral, `float64` otherwise. Nil/empty → `0`. |
+| `sum(xs)`         | `(list) -> num, error`          | Numeric sum. `int64` (overflow-checked) when every element is integral, `float64` otherwise (in any element order, without integer overflow). Nil/empty → `0`. |
 | `slice(xs, i, j)` | `(list\|string, int, int) -> list\|string, error` | Half-open range `[i, j)`. Lists yield `[]any`; strings slice by rune. Negative indices count from the end; out-of-range bounds clamp; `i > j` → empty. Covers the rejected `xs[i:j]` syntax. |
 | `sort(xs)`        | `(list) -> []any, error`        | Ascending stable sort. All elements must be numbers (any int/float mix, compared numerically) or all strings (lexicographic). Elements are not converted: ints stay ints. Nil/empty → `[]any{}`. Mixed or non-comparable types → error. Never mutates the input. |
 | `reverse(xs)`     | `(list) -> []any, error`        | Reversed copy. Never mutates the input. Nil/empty → `[]any{}`. |
@@ -693,8 +724,10 @@ config?.feature?.enabled
 
 The semantics:
 
-- If the receiver is `nil`, the result is `nil` and the right-hand
-  side is not consulted.
+- If the receiver is `nil` — including a typed nil that `== nil`
+  reports as nil, and a nil met while unwrapping pointers — the result
+  is `nil` and the right-hand side (the index expression) is not
+  evaluated.
 - For `?.`, a missing struct field or absent map key resolves to
   `nil`.
 - For `?[`, a missing map key or an out-of-range slice/string index
@@ -706,8 +739,9 @@ The semantics:
 
 The receiver can be any primary expression: an identifier, a selector
 or index chain, a call (including `map(...)` and `if(...)`), a
-parenthesized group, or an array/object literal (`[1, 2]?[0]`,
-`{"a": 1}?.a`). `?.map` and `?.if` work the same way `.map` and
+parenthesized group, an array/object literal (`[1, 2]?[0]`,
+`{"a": 1}?.a`), or a typed literal (`[]any{1}?[0]`,
+`map[string]any{}?.a`). `?.map` and `?.if` work the same way `.map` and
 `.if` do. Calling the result of an optional access (`a?.b()`) is not
 supported and is rejected at Compile time.
 
@@ -757,10 +791,12 @@ Check reports, as a `*TypeError` wrapping `ErrType`, every:
   with a typed `Elem`, a field in `Absent` (which Join sets for a field
   only one side has), or an index by a string that is not a literal
   (`scores[name]`), unless read with `?.`/`?[` or inside `try`;
-- object literal key that is not a string or may be nil;
+- object literal key that is not a string or may be nil (a key typed
+  `"x"?` may be nil too);
 - `==`/`!=` that can never be true: different kinds, or a literal outside
   the other side's enum (`kind == "bugfix"` when kind is
-  `"bug_fix" | "feature"`).
+  `"bug_fix" | "feature"`). Two sides that may both be nil can be equal,
+  so they are not reported whatever their non-nil types.
 - registered function name used as a value instead of called (`first.id`,
   `[upper, 1]`). An env entry or bound name with the same name wins.
 
@@ -781,7 +817,27 @@ an open object does not list may be absent, so it is read with `?.`. Joining
 two objects (through `if`, `||`, a list literal or a function typed with
 `Join`) keeps the fields both have, as present; a field only one has is
 in `Absent`, so `if(c, {"x": 1}, {}).x` is reported and
-`if(c, {"x": 1}, {})?.x` types as `1?`.
+`if(c, {"x": 1}, {})?.x` types as `1?`. In an object literal, a key that
+is not a literal may replace any field listed before it, so in
+`{"x": 1, k: "s"}` the field `x` types as `1 | "s"`; a literal key after it
+sets the field's type outright. Such a key may also name a field not
+listed, so the object is open with the key's value as the type of its
+unlisted fields, which may be absent: `{"x": 1, k: "s"}?.y` types as
+`"s"?`, and `.y` is reported. A key typed as an enum instead adds each of
+its values as a field that may be absent. `slice` of a union of a string
+and a list types as the union of a string and a list.
+
+The rule behind these types: the type Check infers includes every value
+Run can produce from inputs the env types allow — each value that may be
+nil, each member of a union, and each field a computed key may replace. A
+value that is always nil is typed as nil, not left unchecked: `first`,
+`last` and `find` of a nil or empty list (`find(nil, ...)`,
+`first(filter(nil, ...))`), and `o?[k]` on an object with no fields. An
+operation that always fails (indexing with nil) produces no value, so in
+`try(xs[nil], "s")` the result types as `"s"`. `flatMap` adds a list
+body's elements and any other non-nil body as one element, so
+`flatMap(xs, [it, "s"])` types as `list<number | "s">`. `check_soundness_test.go`
+checks the rule against generated schemas, values and expressions.
 `==` and `!=` on lists or objects are reported, since Run rejects them.
 
 `Any` disables checking for the value and everything derived from it, so a
@@ -836,6 +892,35 @@ The following are hard limits:
   do not stop nested higher-order forms from multiplying work
   (`map(xs, map(xs, map(xs, it)))` is `len(xs)³` predicate
   evaluations from a ~30-byte expression). The default is unlimited.
+- **Compile cost**: `Compile` and `NewTemplate` run in time and memory
+  about linear in the source length, whatever its shape (deeply nested
+  literals, long `?.` chains, many template segments). The source
+  rewrites expand their input by at most a constant factor.
+
+Compilation, evaluation and formatting are bounded separately:
+
+- **Compile** (`Compile`, `Check`, `Identifiers`, `Calls`): the source
+  length bounds the parser, the rewrites and every walk of the syntax
+  tree. Each of them takes time and memory near-linear in the source,
+  so a maximal source compiles in well under a second. Error messages
+  quote a higher-order predicate only when it is small (64 syntax
+  nodes or fewer), so an error passing through deeply nested forms
+  does not print the expression again at each level. `Calls` prints an
+  argument's `Source` only when it is asked for.
+- **Run**: `MaxEvalDepth` bounds recursion and `WithEvalBudget` bounds
+  work. Unwrapping pointers stops after 64 levels, so a
+  self-referential pointer type fails as an unsupported receiver
+  instead of looping.
+- **Formatting** (`string(v)`, `sprintf`, template rendering): host
+  values can be cyclic, deeply nested or share structure, and
+  formatting cannot fail, so the bounds show up in the text. A
+  reference already being rendered higher up prints `<cycle>`
+  (including through map keys); nesting deeper than 1000 levels prints
+  `<...>`; after 2^20 values the rest prints `<truncated>`. Structure
+  shared without a cycle (a list holding the same list twice, nested
+  64 times) would otherwise take time exponential in the value's size.
+  Templates render composites as JSON only within the same bounds and
+  fall back to this formatting outside them.
 
 Under adversarial input, expr must never:
 
@@ -845,6 +930,11 @@ Under adversarial input, expr must never:
 - Expose unexported struct fields.
 
 See `FuzzCompile` and `FuzzEval` for the enforcing test targets.
+`TestIsolatedCrashRegressions` runs each crash-shaped case (cyclic,
+deep and shared values through every formatter and evaluator path;
+maximal sources through Compile, Check and Run) in a child process
+with a 64 MiB stack, so a regression into unbounded recursion fails
+one case instead of killing the test run.
 
 ## Cancellation and termination guarantees
 
@@ -1147,7 +1237,13 @@ for _, c := range p.Calls("ask") {
 ## Error model
 
 All runtime failures wrap `ErrEvaluate`; all parse failures wrap
-`ErrCompile`. Callers check with `errors.Is(err, ErrEvaluate)` /
-`errors.Is(err, ErrCompile)`. User function errors returned from
-`(T, error)` signatures are wrapped such that both `errors.Is` and
-`errors.As` still find the original cause.
+`ErrCompile`. A compile error names the 1-based `line:column` of the
+problem in the source as written: expr rewrites JSON literals, `?.`/`?[`,
+keyword fields and `map`/`if` before parsing, but positions are mapped back
+through those rewrites. In a template, the position is within the
+`${...}` body. Callers check with `errors.Is(err, ErrEvaluate)` /
+`errors.Is(err, ErrCompile)`. Errors returned by host functions — the
+error of a `(T, error)` signature, including a non-pointer error value,
+and the error of a `Func` — are wrapped such that both `errors.Is` and
+`errors.As` still find the original cause. An error that already wraps
+`ErrEvaluate`, or a context cancellation error, is returned as is.

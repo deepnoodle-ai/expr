@@ -280,12 +280,13 @@ func TestCheckMatchesRun(t *testing.T) {
 		"bx": ObjectOf(map[string]*Type{"x": String(), "y": Number()}),
 		"nb": ObjectOf(map[string]*Type{"x": String(), "y": Number()}).OrNil(),
 		"c":  Bool(),
+		"e":  EnumOf("x").OrNil(),
 		// A host may mark a field absent itself: draft's title is
 		// missing at run time.
 		"draft": &Type{Kind: KindObject, Fields: map[string]*Type{"title": String()}, Absent: map[string]bool{"title": true}},
 	}
 	values := map[string]any{
-		"b": map[string]any{"y": "s"}, "bx": map[string]any{"x": "v", "y": 1}, "nb": nil, "c": false, "draft": map[string]any{},
+		"b": map[string]any{"y": "s"}, "bx": map[string]any{"x": "v", "y": 1}, "nb": nil, "c": false, "e": nil, "draft": map[string]any{},
 		"s": nil, "w": "x", "xs": []any{1, 2}, "ys": nil,
 		"a":   map[string]any{"t": []any{"q"}, "n": nil},
 		"obj": map[string]any{"k": "v"}, "scores": map[string]any{"alice": 1}, "k": "bob",
@@ -375,6 +376,23 @@ func TestCheckMatchesRun(t *testing.T) {
 		`{"o": if(c, bx, b)}.o.x`:   `field "x" may be absent; use ?.`,
 		`draft.title`:               `field "title" may be absent; use ?.`,
 		`if(c, {"x": 1}, {}).x`:     `field "x" may be absent; use ?.`,
+		// A computed key may replace an earlier field.
+		`{"bob": 1, k: "s"}.bob + 1`: "the operation needs one kind",
+		// A nullable key is not its sole non-nil value.
+		`{e: 1}`: "`e`: may be nil",
+		// slice keeps both kinds of a union argument.
+		`sum(slice(if(c, [1], "abc"), 0, 1))`: "may be string, and must be a list",
+		// Soundness harness finds: a computed key may name any field,
+		// and the value of an operation that always fails, or of a list
+		// that is always empty, is not unknown.
+		`{"bob": 1, k: c}.x`:           `field "x" may be absent; use ?.`,
+		`first(nil).a`:                 "the value is always nil",
+		`-find(nil, it)`:               "nil is not a number",
+		`-try(xs[nil], "s")`:           `"s" is not a number`,
+		`first(flatMap(xs, 0)).b`:      `cannot read field "b"`,
+		`round(last(filter(nil, it)))`: "argument 1 is always nil",
+		`lower({}?[k])`:                "argument 1 is always nil",
+		`2.5?[nil]`:                    "cannot index 2.5",
 		// The items of a list joined with [] are still checked.
 		`any(xn || [], it.nope == 1)`:         `no field "nope"`,
 		`any(coalesce(xn, []), it.nope == 1)`: `no field "nope"`,
@@ -395,6 +413,9 @@ func TestCheckMatchesRun(t *testing.T) {
 		`"a" == 1`:         "is never true",
 		`"a" == "b"`:       `never "b"`,
 		`1 != "1"`:         "is never true",
+		// first([]) and find([], ...) are always nil.
+		`if(c, first([]), "s") == 1`:        "is never true",
+		`if(c, "s", find([], it > 1)) == 1`: "is never true",
 	} {
 		_, err := compile(src).Check(env)
 		require.Error(t, err, src)
@@ -440,10 +461,18 @@ func TestCheckMatchesRun(t *testing.T) {
 		`filter(coalesce(xn, []), it.a > 0)`: "list<{a: number}>",
 		`if(c, [], x)`:                       "list<{a: number}>",
 		`[]`:                                 "list<any>",
-		// The element of an empty list is unknown, not nil-free: first([])
-		// is nil at run time, so this comparison can be true.
-		`if(c, first([]), "s") == 1`:        "bool",
-		`if(c, "s", find([], it > 1)) == 1`: "bool",
+		// first([]) and find([], ...) are nil at run time, so comparing
+		// them with nil can be true.
+		`if(c, first([]), "s") == nil`:        "bool",
+		`if(c, "s", find([], it > 1)) == nil`: "bool",
+		// A computed key's value is the type of the fields it may name.
+		`{"bob": 1, k: "s"}?.x`:  `"s"?`,
+		`{"bob": 1, k: "s"}.bob`: `1 | "s"`,
+		`{"bob": 1, k: "s"}?[k]`: `(1 | "s")?`,
+		`try(xs[nil], "s")`:      `"s"`,
+		`flatMap(xs, [it, "s"])`: "list<number | \"s\">",
+		`flatMap(nil, it)`:       "list<any>",
+		`first(filter(nil, it))`: "nil",
 	} {
 		p := compile(src)
 		got, err := p.Check(env, coalesceType)

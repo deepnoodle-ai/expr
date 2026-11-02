@@ -1,6 +1,9 @@
 package expr
 
-import "go/ast"
+import (
+	"go/ast"
+	"sync"
+)
 
 // Call is one call of a registered function, as Program.Calls reports it.
 type Call struct {
@@ -97,18 +100,45 @@ func (p *Program) walkCalls(node ast.Expr, bound *boundIdents, want map[string]b
 // sub returns the subtree node as a Program of its own. It shares the
 // parent's caches, which are read-only after compile, and its Source is
 // the subtree printed back in display form.
+//
+// Source and Identifiers are computed on first use: each costs time in
+// the size of the subtree, and Calls makes a sub for every argument of
+// every matching call, so computing them eagerly is quadratic in the
+// nesting of calls (`f(f(f(...)))`, or a long pipe chain).
 func (p *Program) sub(node ast.Expr) *Program {
 	return &Program{
-		source:      exprDisplayString(node),
-		root:        node,
-		funcs:       p.funcs,
-		prepared:    p.prepared,
-		fieldTags:   p.fieldTags,
-		callCache:   p.callCache,
-		litCache:    p.litCache,
-		identifiers: collectIdentifiers(node, p.funcs),
-		evalBudget:  p.evalBudget,
+		root:       node,
+		funcs:      p.funcs,
+		prepared:   p.prepared,
+		fieldTags:  p.fieldTags,
+		callCache:  p.callCache,
+		litCache:   p.litCache,
+		evalBudget: p.evalBudget,
+		noOptimize: p.noOptimize,
+		deferred:   &deferredInfo{},
 	}
+}
+
+// deferredInfo holds the Source and Identifiers of a Program made by
+// sub, computed once when first asked for.
+type deferredInfo struct {
+	once        sync.Once
+	source      string
+	identifiers []string
+}
+
+// resolveDeferred fills in p's source and identifiers if they were
+// deferred. It is safe for concurrent use.
+func (p *Program) resolveDeferred() (source string, identifiers []string) {
+	if p.deferred == nil {
+		return p.source, p.identifiers
+	}
+	d := p.deferred
+	d.once.Do(func() {
+		d.source = exprDisplayString(p.root)
+		d.identifiers = collectIdentifiers(p.root, p.funcs)
+	})
+	return d.source, d.identifiers
 }
 
 // Literal returns the program's value when the whole expression is a

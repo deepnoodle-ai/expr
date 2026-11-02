@@ -252,9 +252,16 @@ func union(a, b *Type) *Type {
 // empty is the element type of an empty list literal. A list with no
 // elements fits any element type, so joining it with another list keeps
 // that list's element type: the fallback in `xs || []` or `if(c, xs, [])`
-// keeps xs's. Anywhere else, such as the result of first([]), it is
-// unchecked, like Any.
+// keeps xs's. first and last of such a list are nil. Anywhere else, such
+// as an element bound by map([], ...), it is unchecked, like Any.
 var empty = &Type{Kind: KindAny}
+
+// never is the type of an operation that always fails at run time, such
+// as indexing with nil. It produces no value, so joining it with another
+// type gives that type: try(x[nil], y) has y's type. Anywhere else it is
+// unchecked, like Any, since the failure is reported where it happens
+// (or caught by try).
+var never = &Type{Kind: KindAny}
 
 func orAny(t *Type) *Type {
 	if t == nil {
@@ -269,6 +276,10 @@ func Join(a, b *Type) *Type {
 	case a == nil:
 		return b
 	case b == nil:
+		return a
+	case a == never:
+		return b
+	case b == never:
 		return a
 	case a.isAny() || b.isAny():
 		return Any

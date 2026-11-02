@@ -32,8 +32,9 @@ import (
 // a host deliberately shadows it. Every name that can only resolve
 // through the env is always included.
 func (p *Program) Identifiers() []string {
-	out := make([]string, len(p.identifiers))
-	copy(out, p.identifiers)
+	_, identifiers := p.resolveDeferred()
+	out := make([]string, len(identifiers))
+	copy(out, identifiers)
 	return out
 }
 
@@ -57,18 +58,28 @@ func collectIdentifiers(root ast.Expr, funcs map[string]any) []string {
 type boundIdents struct {
 	element string
 	parent  *boundIdents
+	// memo caches has's answers from parent, so names in deeply nested
+	// forms resolve in amortized constant time instead of walking every
+	// enclosing binding.
+	memo map[string]bool
 }
 
 func (b *boundIdents) has(name string) bool {
-	if b != nil && name == "index" {
+	if b == nil {
+		return false
+	}
+	if name == "index" || name == b.element {
 		return true
 	}
-	for s := b; s != nil; s = s.parent {
-		if name == s.element {
-			return true
-		}
+	if v, ok := b.memo[name]; ok {
+		return v
 	}
-	return false
+	v := b.parent.has(name)
+	if b.memo == nil {
+		b.memo = map[string]bool{}
+	}
+	b.memo[name] = v
+	return v
 }
 
 // walkIdentifiers visits node and records env-resolved identifier

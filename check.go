@@ -104,6 +104,9 @@ type checker struct {
 	// here: the right side of `x != nil && ...`, the then-branch of
 	// `if(x != nil, ...)`.
 	narrowed map[string]int
+	// narrowedMaxLen is the length of the longest text ever added to
+	// narrowed in this check.
+	narrowedMaxLen int
 }
 
 // narrowings returns the expressions that cond being truthy (or falsy)
@@ -142,23 +145,91 @@ func isNilIdent(e ast.Expr) bool {
 }
 
 // narrow checks node with the given expressions known not to be nil.
-func (c *checker) narrow(names []string, node ast.Expr, sc *scope) *Type {
+// logicalChain checks a run of one logical operator, `a && b && c`
+// (which parses as `(a && b) && c`). `x && y` is x when x is falsy, else
+// y, checked knowing x is truthy; `x || y` is x when x is truthy (so
+// never nil), else y, checked knowing x is falsy. What the left side
+// proves is everything its operands prove, so the chain is checked as a
+// list: each operand's narrowings are added once and stay in force for
+// the operands after it. Checking it as nested binaries instead
+// recollects the whole left side at every level, quadratic in the
+// chain's length.
+func (c *checker) logicalChain(n *ast.BinaryExpr, sc *scope) *Type {
+	op := n.Op
+	operands := []ast.Expr{n.Y}
+	x := n.X
+	for {
+		b, ok := x.(*ast.BinaryExpr)
+		if !ok || b.Op != op {
+			break
+		}
+		operands = append(operands, b.Y)
+		x = b.X
+	}
+	operands = append(operands, x)
+	// operands is right to left; walk it left to right.
+	truthy := op == token.LAND
+	var applied []string
+	var acc *Type
+	for i := len(operands) - 1; i >= 0; i-- {
+		e := operands[i]
+		t := c.check(e, sc)
+		switch {
+		case acc == nil:
+			acc = t
+		case op == token.LAND:
+			acc = Join(acc, t)
+		default:
+			acc = Join(acc.NonNil(), t)
+		}
+		if i > 0 {
+			names := narrowings(e, truthy)
+			c.addNarrowings(names)
+			applied = append(applied, names...)
+		}
+	}
+	c.dropNarrowings(applied)
+	return acc
+}
+
+func (c *checker) addNarrowings(names []string) {
 	if c.narrowed == nil {
 		c.narrowed = map[string]int{}
 	}
 	for _, n := range names {
 		c.narrowed[n]++
+		// applyNarrowing skips nodes too big to print as any
+		// narrowed text.
+		if size := len(n); size > c.narrowedMaxLen {
+			c.narrowedMaxLen = size
+		}
 	}
-	t := c.check(node, sc)
+}
+
+func (c *checker) dropNarrowings(names []string) {
 	for _, n := range names {
 		c.narrowed[n]--
 	}
+}
+
+func (c *checker) narrow(names []string, node ast.Expr, sc *scope) *Type {
+	c.addNarrowings(names)
+	t := c.check(node, sc)
+	c.dropNarrowings(names)
 	return t
 }
 
 // applyNarrowing drops Optional from a value narrowed by its context.
 func (c *checker) applyNarrowing(node ast.Expr, t *Type) *Type {
 	if len(c.narrowed) == 0 || t == nil || !t.Optional {
+		return t
+	}
+	// A node prints as at least half a byte per syntax node (the
+	// smallest ratio is a displayed literal: `[]any{}`, three nodes,
+	// prints `[]`), so a node with more than twice as many nodes as the
+	// longest narrowed text has bytes cannot match it. Skipping those
+	// keeps this from printing every enclosing node of a deep expression.
+	if !astWithin(node, 2*c.narrowedMaxLen+2) {
 		return t
 	}
 	if c.narrowed[exprDisplayString(node)] > 0 {
@@ -171,15 +242,34 @@ func (c *checker) applyNarrowing(node ast.Expr, t *Type) *Type {
 type scope struct {
 	names  map[string]*Type
 	parent *scope
+	// memo caches the answers lookup got from parent. Nested forms make
+	// a chain as long as their nesting, and each level looks names up;
+	// without the memo every lookup walks the whole chain, which is
+	// quadratic in the nesting.
+	memo map[string]scopeHit
+}
+
+type scopeHit struct {
+	t  *Type
+	ok bool
 }
 
 func (s *scope) lookup(name string) (*Type, bool) {
-	for ; s != nil; s = s.parent {
-		if t, ok := s.names[name]; ok {
-			return t, true
-		}
+	if s == nil {
+		return nil, false
 	}
-	return nil, false
+	if t, ok := s.names[name]; ok {
+		return t, true
+	}
+	if h, ok := s.memo[name]; ok {
+		return h.t, h.ok
+	}
+	t, ok := s.parent.lookup(name)
+	if s.memo == nil {
+		s.memo = map[string]scopeHit{}
+	}
+	s.memo[name] = scopeHit{t, ok}
+	return t, ok
 }
 
 func (c *checker) report(node ast.Expr, format string, args ...any) {
@@ -312,16 +402,8 @@ func plain(t *Type) *Type {
 
 func (c *checker) binary(n *ast.BinaryExpr, sc *scope) *Type {
 	switch n.Op {
-	case token.LAND:
-		// `a && b` is a when a is falsy, else b.
-		l := c.check(n.X, sc)
-		r := c.narrow(narrowings(n.X, true), n.Y, sc)
-		return Join(l, r)
-	case token.LOR:
-		// `a || b` is a when a is truthy (so never nil), else b.
-		l := c.check(n.X, sc)
-		r := c.narrow(narrowings(n.X, false), n.Y, sc)
-		return Join(l.NonNil(), r)
+	case token.LAND, token.LOR:
+		return c.logicalChain(n, sc)
 	}
 	l, r := c.check(n.X, sc), c.check(n.Y, sc)
 	switch n.Op {
@@ -385,6 +467,11 @@ func (c *checker) comparable(n *ast.BinaryExpr, l, r *Type) {
 			return
 		}
 	}
+	// Two values that may both be nil can be equal whatever their
+	// non-nil types are.
+	if l.Optional && r.Optional {
+		return
+	}
 	shared := false
 	for _, a := range lk {
 		for _, b := range rk {
@@ -424,10 +511,13 @@ func (c *checker) field(n, recvNode ast.Expr, recv *Type, name string, optional 
 	case recv.isAny():
 		return Any
 	case recv.Kind == KindNull:
-		if !optional && c.lenient == 0 {
+		if optional {
+			return Null()
+		}
+		if c.lenient == 0 {
 			c.report(n, "the value is always nil")
 		}
-		return Null()
+		return never
 	}
 	if !optional {
 		c.nilCheck(recvNode, recv)
@@ -489,20 +579,30 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 		return Any
 	}
 	if recv.Kind == KindNull {
-		if !optional && c.lenient == 0 {
+		if optional {
+			return Null()
+		}
+		if c.lenient == 0 {
 			c.report(n, "the value is always nil")
 		}
-		return Null()
+		return never
 	}
 	if !optional {
 		c.nilCheck(recvNode, recv)
 	}
 	// A nil index fails even after ?[.
 	if idx.Kind == KindNull {
-		if c.lenient == 0 {
+		switch {
+		case recv.Kind != KindList && recv.Kind != KindString && recv.Kind != KindObject:
+			c.report(n, "cannot index %s", recv)
+		case c.lenient == 0:
 			c.report(idxNode, "the index is always nil")
 		}
-		return Any
+		if optional && recv.Optional {
+			// ?[ gives nil for a nil receiver without reading the index.
+			return Null()
+		}
+		return never
 	}
 	c.nilCheck(idxNode, idx)
 	if !c.oneKind(idxNode, idx) {
@@ -513,6 +613,14 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 	case KindList, KindString:
 		what := "list"
 		out = recv.Elem
+		if out == empty {
+			// The list is always empty: [i] is out of range and ?[i]
+			// is nil.
+			out = never
+			if optional {
+				out = Null()
+			}
+		}
 		if recv.Kind == KindString {
 			what, out = "string", String()
 		}
@@ -550,6 +658,13 @@ func (c *checker) index(n, recvNode ast.Expr, recv *Type, idxNode ast.Expr, idx 
 		}
 		if recv.Open {
 			out = Join(out, recv.Elem)
+		}
+		if out == nil {
+			// A closed object with no fields: every key is absent.
+			if optional {
+				return Null()
+			}
+			return never
 		}
 	default:
 		c.report(n, "cannot index %s", recv)
@@ -723,16 +838,23 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 	for k, v := range hidden {
 		c.narrowed[k] = v
 	}
+	if ct.Kind == KindNull || ct.Kind == KindList && ct.Elem == empty {
+		// The body never runs: the list is empty, or nil, which
+		// iterates as an empty list.
+		switch form {
+		case "find":
+			return Null()
+		case "map", "filter", "sortBy", "flatMap":
+			return ListOf(empty)
+		}
+	}
 	switch form {
 	case "map":
 		return ListOf(bt)
 	case "filter", "sortBy":
 		return ListOf(elem)
 	case "flatMap":
-		if bt.Kind == KindList {
-			return ListOf(bt.Elem)
-		}
-		return ListOf(Any)
+		return ListOf(flatElem(bt))
 	case "any", "all":
 		return Bool()
 	case "find":
@@ -741,6 +863,30 @@ func (c *checker) iterating(n *ast.CallExpr, form string, sc *scope) *Type {
 		return Number()
 	}
 	return Any
+}
+
+// flatElem is the element type of flatMap's result for a body of type bt:
+// a list body adds its elements, nil adds nothing, and any other value is
+// added as one element.
+func flatElem(bt *Type) *Type {
+	if bt.isAny() {
+		return Any
+	}
+	var out *Type
+	for _, v := range variants(bt.NonNil()) {
+		switch {
+		case v.Kind == KindNull:
+		case v.Kind == KindList && v.Elem == empty:
+		case v.Kind == KindList:
+			out = Join(out, orAny(v.Elem))
+		default:
+			out = Join(out, v)
+		}
+	}
+	if out == nil {
+		return empty
+	}
+	return out
 }
 
 // mentions reports whether the source text src refers to the name as an
@@ -783,11 +929,13 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			}
 			kt := c.check(kv.Key, sc)
 			vt := c.check(kv.Value, sc)
-			if key, ok := literalString(kt); ok {
+			// A later key replaces an earlier one, so a literal key's
+			// field has exactly the value's type.
+			if key, ok := literalString(kt); ok && !kt.Optional {
 				out.Fields[key] = vt
+				delete(out.Absent, key)
 				continue
 			}
-			out.Open = true
 			switch {
 			case kt.Kind == KindNull:
 				c.report(kv.Key, "an object key is always nil")
@@ -797,10 +945,52 @@ func (c *checker) composite(n *ast.CompositeLit, sc *scope) *Type {
 			default:
 				c.nilCheck(kv.Key, kt)
 			}
+			c.computedKey(out, kt, orAny(vt))
 		}
 		return out
 	}
 	return Any
+}
+
+// computedKey adds to out, an object literal's type so far, an entry
+// whose key is not a literal. The key may replace any field listed so far
+// (only those in its enum, if it has one), so each such field may hold
+// either type. A key from an enum adds each value of the enum as a field
+// that may be absent; any other key may name any field, so the object is
+// open and its unlisted fields, which may be absent, have the value's
+// type.
+func (c *checker) computedKey(out *Type, kt, vt *Type) {
+	enum := kt.Kind == KindString && len(kt.Enum) > 0
+	for name, ft := range out.Fields {
+		if enum && !kt.hasEnumValue(name) {
+			continue
+		}
+		out.Fields[name] = Join(orAny(ft), vt)
+	}
+	if !enum {
+		if out.Open {
+			out.Elem = Join(orAny(out.Elem), vt)
+		} else {
+			out.Open, out.Elem = true, vt
+		}
+		return
+	}
+	for _, v := range kt.Enum {
+		name, _ := v.(string)
+		if _, ok := out.Fields[name]; ok {
+			continue
+		}
+		field := vt
+		if out.Open {
+			// The key may also hold an earlier computed key's value.
+			field = Join(orAny(out.Elem), vt)
+		}
+		out.Fields[name] = field
+		if out.Absent == nil {
+			out.Absent = map[string]bool{}
+		}
+		out.Absent[name] = true
+	}
 }
 
 func literalString(t *Type) (string, bool) {
@@ -1005,31 +1195,54 @@ func entriesType(a []*Type) *Type {
 	return ListOf(ObjectOf(map[string]*Type{"key": String(), "value": value}))
 }
 
+// elemOrNil is the result of first and last: an element, or nil for an
+// empty or nil list.
 func elemOrNil(a []*Type) *Type {
-	if len(a) == 1 && a[0].Kind == KindList {
+	switch {
+	case len(a) != 1:
+		return Any
+	case a[0].Kind == KindList && a[0].Elem == empty:
+		return Null() // the list is always empty
+	case a[0].Kind == KindList:
 		return orAny(a[0].Elem).OrNil()
+	case a[0].Kind == KindNull:
+		return Null()
 	}
 	return Any
 }
 
 // listType is the result of sort and reverse: a new list, empty for nil.
 func listType(a []*Type) *Type {
-	if len(a) == 1 && a[0].Kind == KindList {
+	switch {
+	case len(a) == 1 && a[0].Kind == KindList:
 		return ListOf(orAny(a[0].Elem))
+	case len(a) == 1 && a[0].Kind == KindNull:
+		return ListOf(empty)
 	}
 	return ListOf(Any)
 }
 
-// sliceType is a list for a list or nil, and a string for a string.
+// sliceType is a list for a list or nil, and a string for a string. A
+// union argument gives the union of those results.
 func sliceType(a []*Type) *Type {
 	if len(a) == 0 || a[0].isAny() {
 		return Any
 	}
-	if a[0].Kind == KindString {
-		if a[0].Optional {
-			return Join(String(), ListOf(Any))
+	var out, list *Type
+	for _, v := range variants(a[0]) {
+		switch v.Kind {
+		case KindString:
+			out = Join(out, String())
+		case KindList:
+			list = Join(list, listType([]*Type{v}))
 		}
-		return String()
 	}
-	return listType(a[:1])
+	// nil slices to an empty list, which fits any list element type.
+	if list == nil && (a[0].Optional || a[0].Kind == KindNull) {
+		list = ListOf(Any)
+	}
+	if out = Join(out, list); out == nil {
+		return ListOf(Any)
+	}
+	return out
 }

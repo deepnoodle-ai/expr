@@ -271,6 +271,12 @@ func wrapPredicateErr(name string, predicate ast.Expr, index int, err error) err
 // a backtick (which would clash with the surrounding error format),
 // letting wrapPredicateErr fall back to a position-only message.
 func formatPredicate(node ast.Expr) string {
+	// A large predicate is left out of the message: printing it costs
+	// time in its size at every enclosing form an error passes through,
+	// which is quadratic for deeply nested forms.
+	if !astWithin(node, maxPredicateDisplayNodes) {
+		return ""
+	}
 	out := exprDisplayString(node)
 	if out == "" || strings.ContainsRune(out, '`') {
 		return ""
@@ -280,6 +286,24 @@ func formatPredicate(node ast.Expr) string {
 
 // exprDisplayString prints node via go/printer after rewriting it
 // into user-facing display form. Returns "" when printing fails.
+// maxPredicateDisplayNodes is the largest predicate, in AST nodes, that
+// an error message quotes.
+const maxPredicateDisplayNodes = 64
+
+// astWithin reports whether node has at most limit AST nodes, visiting
+// at most about limit of them.
+func astWithin(node ast.Node, limit int) bool {
+	n := 0
+	ast.Inspect(node, func(x ast.Node) bool {
+		if x == nil || n > limit {
+			return false
+		}
+		n++
+		return true
+	})
+	return n <= limit
+}
+
 func exprDisplayString(node ast.Expr) string {
 	var buf bytes.Buffer
 	if err := printer.Fprint(&buf, token.NewFileSet(), displayExpr(node)); err != nil {
@@ -659,7 +683,7 @@ func formTrySelect(p *Program, ctx context.Context, n *ast.CallExpr, env any, de
 	if err != nil {
 		return nil, err
 	}
-	if recv == nil {
+	if isNilValue(recv) {
 		return nil, nil
 	}
 	name, err := p.eval(ctx, n.Args[1], env, depth)
@@ -687,7 +711,7 @@ func formTryIndex(p *Program, ctx context.Context, n *ast.CallExpr, env any, dep
 	if err != nil {
 		return nil, err
 	}
-	if recv == nil {
+	if isNilValue(recv) {
 		return nil, nil
 	}
 	idx, err := p.eval(ctx, n.Args[1], env, depth)
@@ -695,116 +719,6 @@ func formTryIndex(p *Program, ctx context.Context, n *ast.CallExpr, env any, dep
 		return nil, err
 	}
 	return tryIndexValue(recv, idx)
-}
-
-// trySelectName mirrors selectField but returns nil for missing
-// fields or keys. Method values are not surfaced; selectField does
-// not surface them either, so the two paths agree on what counts as
-// a "field" lookup.
-func trySelectName(recv any, name string, fieldTags *structTagConfig) (any, error) {
-	if recv == nil {
-		return nil, nil
-	}
-	if m, ok := recv.(map[string]any); ok {
-		v := m[name]
-		return v, nil
-	}
-	rv := reflect.ValueOf(recv)
-	if rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return nil, nil
-		}
-		rv = rv.Elem()
-	}
-	switch rv.Kind() {
-	case reflect.Struct:
-		fv, ok, err := structFieldByName(rv, name, fieldTags)
-		if err != nil {
-			return nil, err
-		}
-		if !ok || !fv.IsValid() || !fv.CanInterface() {
-			return nil, nil
-		}
-		return fv.Interface(), nil
-	case reflect.Map:
-		if rv.Type().Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("%w: cannot select %q on map with non-string keys",
-				ErrEvaluate, name)
-		}
-		mv := rv.MapIndex(mapStringKey(rv.Type().Key(), name))
-		if !mv.IsValid() {
-			return nil, nil
-		}
-		return mv.Interface(), nil
-	}
-	return nil, fmt.Errorf("%w: cannot select %q on %T", ErrEvaluate, name, recv)
-}
-
-// tryIndexValue mirrors indexValue but returns nil for missing
-// keys and out-of-range slice/string indices. Wrong-kind errors
-// (e.g., string index into a slice, non-integer slice index) still
-// propagate.
-func tryIndexValue(recv, idx any) (any, error) {
-	if recv == nil {
-		return nil, nil
-	}
-	if m, ok := recv.(map[string]any); ok {
-		key, ok := idx.(string)
-		if !ok {
-			return nil, fmt.Errorf("%w: map index must be string, got %T",
-				ErrEvaluate, idx)
-		}
-		v := m[key]
-		return v, nil
-	}
-	rv := reflect.ValueOf(recv)
-	switch rv.Kind() {
-	case reflect.Slice, reflect.Array:
-		i, err := toIndexInt(idx)
-		if err != nil {
-			return nil, err
-		}
-		if i < 0 || i >= int64(rv.Len()) {
-			return nil, nil
-		}
-		return rv.Index(int(i)).Interface(), nil
-	case reflect.String:
-		i, err := toIndexInt(idx)
-		if err != nil {
-			return nil, err
-		}
-		runes := []rune(rv.String())
-		if i < 0 || i >= int64(len(runes)) {
-			return nil, nil
-		}
-		return string(runes[i]), nil
-	case reflect.Map:
-		keyType := rv.Type().Key()
-		if idx == nil {
-			return nil, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
-		}
-		kv := reflect.ValueOf(idx)
-		if !kv.Type().AssignableTo(keyType) {
-			if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
-				converted, err := safeNumericConvert(kv, keyType)
-				if err != nil {
-					return nil, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
-				}
-				kv = converted
-			} else if kv.Type().ConvertibleTo(keyType) {
-				kv = kv.Convert(keyType)
-			} else {
-				return nil, fmt.Errorf("%w: cannot use %T as map key %v",
-					ErrEvaluate, idx, keyType)
-			}
-		}
-		mv := rv.MapIndex(kv)
-		if !mv.IsValid() {
-			return nil, nil
-		}
-		return mv.Interface(), nil
-	}
-	return nil, fmt.Errorf("%w: cannot index %T", ErrEvaluate, recv)
 }
 
 // formIf implements `if(cond, then, else)` as a lazy special form:

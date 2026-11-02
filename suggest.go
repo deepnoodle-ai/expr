@@ -51,7 +51,11 @@ func formatHint(name string, candidates []string) string {
 	if len(candidates) == 0 {
 		return ""
 	}
+	// Sort first: candidates often come from map iteration, and
+	// closestName keeps the first of equally close names, so the hint
+	// must not depend on that order.
 	candidates = dedup(candidates)
+	sort.Strings(candidates)
 	if closest, ok := closestName(name, candidates); ok {
 		return fmt.Sprintf(" (did you mean %q?)", closest)
 	}
@@ -62,7 +66,6 @@ func formatHint(name string, candidates []string) string {
 	if len(candidates) > maxList {
 		return ""
 	}
-	sort.Strings(candidates)
 	return fmt.Sprintf(" (available: %s)", strings.Join(candidates, ", "))
 }
 

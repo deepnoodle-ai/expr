@@ -20,6 +20,8 @@ import (
 // into steady-state measurements.
 var engOpts = []expr.Option{expr.WithBuiltins()}
 
+// Exercises the typed binary-operator fast path; equivalence:
+// TestApplyBinaryFastMatchesGeneral.
 func Benchmark_expr(b *testing.B) {
 	params := map[string]any{
 		"Origin":  "MOW",
@@ -50,6 +52,8 @@ func Benchmark_expr(b *testing.B) {
 	}
 }
 
+// Exercises the prepared-call cache; equivalence:
+// TestEquivalencePreparedCallCache.
 func Benchmark_len(b *testing.B) {
 	env := map[string]any{
 		"arr": make([]int, 100),
@@ -132,6 +136,8 @@ func Benchmark_filterLen(b *testing.B) {
 	}
 }
 
+// Exercises filter(xs, p)[k] streaming; equivalence:
+// TestEquivalenceFilterIndex.
 func Benchmark_filterFirst(b *testing.B) {
 	ints := make([]int, 1000)
 	for i := 1; i <= len(ints); i++ {
@@ -224,6 +230,8 @@ type priceEnv struct {
 	Price Price
 }
 
+// Exercises the reflect selector chain; equivalence:
+// TestEquivalenceSelectorChain.
 func Benchmark_envStruct(b *testing.B) {
 	program, err := expr.Compile(`Price.Value > 0`, engOpts...)
 	if err != nil {
@@ -362,6 +370,8 @@ func Benchmark_structTagsWide(b *testing.B) {
 	}
 }
 
+// Exercises the map[string]any access branches; equivalence:
+// TestValueMatrixPathsAgree (map env vs struct env).
 func Benchmark_envMap(b *testing.B) {
 	env := map[string]any{
 		"price": Price{Value: 1},
@@ -410,6 +420,8 @@ func (CallFoo) Method() string {
 	return "method"
 }
 
+// Exercises calls through a struct env; equivalence:
+// TestEquivalencePreparedCallCache and TestCallMatrixPathsAgree.
 func Benchmark_callFunc(b *testing.B) {
 	program, err := expr.Compile(`Func()`, engOpts...)
 	if err != nil {
@@ -513,6 +525,8 @@ func Benchmark_largeStructAccess(b *testing.B) {
 	}
 }
 
+// Exercises the reflect selector chain; equivalence:
+// TestEquivalenceSelectorChain.
 func Benchmark_largeNestedStructAccess(b *testing.B) {
 	type Env struct {
 		Inner struct {
@@ -545,6 +559,8 @@ func Benchmark_largeNestedStructAccess(b *testing.B) {
 	}
 }
 
+// Exercises the reflect index chain; equivalence:
+// TestEquivalenceIndexChain.
 func Benchmark_largeNestedArrayAccess(b *testing.B) {
 	type Env struct {
 		Data [1][1024 * 1024 * 10]byte

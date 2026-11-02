@@ -63,10 +63,18 @@ func TestRewrite(t *testing.T) {
 		{`a?.map`, `__try_select__(a, "map")`},
 		{`a?.if`, `__try_select__(a, "if")`},
 
-		// typed composite literals are declined (no backwards type
-		// walk); the parser reports the stray `?`
-		{`[]any{1}?.x`, `[]any{1}?.x`},
-		{`map[string]any{"a": 1}?.a`, `map[string]any{"a": 1}?.a`},
+		// typed slice, array and map literals include their type
+		{`[]any{1}?.x`, `__try_select__([]any{1}, "x")`},
+		{`x * []any{1}?[0]`, `x * __try_index__([]any{1}, 0)`},
+		{`[]interface{}{1}?[0]`, `__try_index__([]interface{}{1}, 0)`},
+		{`[2]int{1, 2}?[0]`, `__try_index__([2]int{1, 2}, 0)`},
+		{`map[string]any{"a": 1}?.a`, `__try_select__(map[string]any{"a": 1}, "a")`},
+		{`map[string]any{"a": {"b": 1}}?.a?.b`, `__try_select__(__try_select__(map[string]any{"a": {"b": 1}}, "a"), "b")`},
+
+		// other typed composites are declined; the parser reports the
+		// stray `?`
+		{`T{1}?.x`, `T{1}?.x`},
+		{`struct{}{}?.x`, `struct{}{}?.x`},
 
 		// `?` not followed by `.` or `[` is left alone
 		{`a ? b : c`, `a ? b : c`},

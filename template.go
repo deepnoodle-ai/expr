@@ -284,7 +284,10 @@ func formatTemplateValue(v any) string {
 	case string:
 		return x
 	}
-	if isCompositeKind(v) {
+	// encoding/json has no depth or work bound; a value outside the
+	// formatting bounds renders through safeFormatValue, which marks
+	// where it stopped.
+	if isCompositeKind(v) && jsonWithinBounds(v) {
 		if s, ok := marshalTemplateJSON(v); ok {
 			return s
 		}
@@ -295,13 +298,9 @@ func formatTemplateValue(v any) string {
 // isCompositeKind reports whether v is a map, slice, array, or struct
 // (following pointers), the shapes that render as JSON in templates.
 func isCompositeKind(v any) bool {
-	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return false
-		}
-		rv = rv.Elem()
-	}
+	// unwrapReceiver bounds the pointer walk, so a self-referential
+	// pointer type cannot loop here.
+	rv, _ := unwrapReceiver(reflect.ValueOf(v))
 	switch rv.Kind() {
 	case reflect.Map, reflect.Slice, reflect.Array, reflect.Struct:
 		return true
@@ -370,6 +369,13 @@ func parseTemplateSegments(raw, open, close string, compile func(string) (runner
 	var segs []templateSegment
 	var lit strings.Builder
 	litStart := 0
+	// Offsets only grow, so one forward-moving line counter and one
+	// byte copy of raw keep parsing linear in the template's length.
+	lines := &lineCounter{raw: raw, line: 1}
+	rawBytes := []byte(raw)
+	// nextEsc is the absolute offset of the next escape at or after i,
+	// -1 when there is none left, or -2 when not yet searched.
+	nextEsc := -2
 	appendLit := func(s string, at int) {
 		if lit.Len() == 0 {
 			litStart = at
@@ -378,7 +384,7 @@ func parseTemplateSegments(raw, open, close string, compile func(string) (runner
 	}
 	flushLit := func() {
 		if lit.Len() > 0 {
-			line, col := templateLineCol(raw, litStart)
+			line, col := lines.at(litStart)
 			segs = append(segs, templateSegment{literal: lit.String(), offset: litStart, line: line, column: col})
 			lit.Reset()
 		}
@@ -395,7 +401,15 @@ func parseTemplateSegments(raw, open, close string, compile func(string) (runner
 		openIdx := strings.Index(raw[i:], open)
 		escIdx := -1
 		if escape != "" {
-			escIdx = strings.Index(raw[i:], escape)
+			if nextEsc == -2 || (nextEsc >= 0 && nextEsc < i) {
+				nextEsc = -1
+				if k := strings.Index(raw[i:], escape); k >= 0 {
+					nextEsc = i + k
+				}
+			}
+			if nextEsc >= 0 {
+				escIdx = nextEsc - i
+			}
 		}
 		if openIdx < 0 && escIdx < 0 {
 			appendLit(raw[i:], i)
@@ -419,11 +433,11 @@ func parseTemplateSegments(raw, open, close string, compile func(string) (runner
 		flushLit()
 		openOffset := i
 		exprStart := i + len(open)
-		bodyEnd, hadContent, err := scanTemplateExprEnd(raw, exprStart, openOffset, open, close, braces)
+		line, col := lines.at(openOffset)
+		bodyEnd, hadContent, err := scanTemplateExprEnd(raw, rawBytes, exprStart, openOffset, open, close, braces, line, col)
 		if err != nil {
 			return nil, err
 		}
-		line, col := templateLineCol(raw, openOffset)
 		body := strings.TrimSpace(raw[exprStart:bodyEnd])
 		if body == "" || !hadContent {
 			return nil, fmt.Errorf("template: empty expression `%s%s` at %d:%d (offset %d)",
@@ -459,6 +473,32 @@ func templateLineCol(raw string, offset int) (line, col int) {
 	return line, col
 }
 
+// lineCounter converts increasing byte offsets in raw to 1-based lines
+// and byte columns, counting each newline once.
+type lineCounter struct {
+	raw         string
+	off, line   int
+	lastNewline int // offset of the last newline before off, or -1
+	initialized bool
+}
+
+func (c *lineCounter) at(offset int) (line, col int) {
+	if !c.initialized {
+		c.lastNewline, c.initialized = -1, true
+	}
+	offset = min(offset, len(c.raw))
+	if offset < c.off {
+		return templateLineCol(c.raw, offset)
+	}
+	for ; c.off < offset; c.off++ {
+		if c.raw[c.off] == '\n' {
+			c.line++
+			c.lastNewline = c.off
+		}
+	}
+	return c.line, offset - c.lastNewline
+}
+
 // scanTemplateExprEnd returns the byte offset within src of the first
 // `}` of the run that closes the opener whose body begins at start.
 // It drives go/scanner over src[start:] and counts brace depth, so
@@ -473,13 +513,17 @@ func templateLineCol(raw string, offset int) (line, col int) {
 // reported as an error rather than silently splitting the closer.
 //
 // hadContent reports whether the scanner saw at least one token inside
-// the body that wasn't a brace or auto-inserted semicolon, so that
+// the body other than the closing braces or an auto-inserted semicolon, so that
 // comment-only bodies like `${/* hi */}` are rejected up front with
 // the same "empty expression" error as `${}`.
 //
 // openOffset is the byte offset of the opening delimiter in the
 // original raw template source; it's only used for error messages.
-func scanTemplateExprEnd(src string, start, openOffset int, open, close string, braces int) (end int, hadContent bool, err error) {
+//
+// srcBytes is src as bytes, converted once by the caller so scanning
+// each expression does not copy the rest of the template; line and col
+// locate the opener for error messages.
+func scanTemplateExprEnd(src string, srcBytes []byte, start, openOffset int, open, close string, braces, line, col int) (end int, hadContent bool, err error) {
 	fset := token.NewFileSet()
 	file := fset.AddFile("", fset.Base(), len(src)-start)
 
@@ -487,9 +531,8 @@ func scanTemplateExprEnd(src string, start, openOffset int, open, close string, 
 	// A no-op error handler keeps the scanner advancing through any
 	// lex errors. Compile will surface the real diagnostic when the
 	// body is later fed to go/parser.
-	s.Init(file, []byte(src[start:]), func(token.Position, string) {}, 0)
+	s.Init(file, srcBytes[start:], func(token.Position, string) {}, 0)
 
-	line, col := templateLineCol(src, openOffset)
 	depth := braces // we are already inside the opener's brace run
 	for {
 		pos, tok, _ := s.Scan()
@@ -498,7 +541,10 @@ func scanTemplateExprEnd(src string, start, openOffset int, open, close string, 
 			return 0, false, fmt.Errorf("template: unclosed `%s` at %d:%d (offset %d, missing `%s`)",
 				open, line, col, openOffset, close)
 		case token.LBRACE:
+			// The opener's own braces are not scanned, so every `{`
+			// here belongs to the body (an object literal like `${{}}`).
 			depth++
+			hadContent = true
 		case token.RBRACE:
 			depth--
 			if depth == 0 {

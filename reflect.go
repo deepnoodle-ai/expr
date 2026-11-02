@@ -2,6 +2,7 @@ package expr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -23,27 +24,38 @@ var (
 // and is not counted against the caller-supplied argument list.
 func callFunction(ctx context.Context, name string, fn any, args []any) (any, error) {
 	if nf, ok := fn.(Func); ok {
-		return nf(ctx, args)
+		if nf == nil {
+			return nil, fmt.Errorf("%w: %q is a nil function value", ErrEvaluate, name)
+		}
+		v, err := nf(ctx, args)
+		return v, wrapCallErr(name, err)
 	}
-	fv := reflect.ValueOf(fn)
+	return callFuncValue(ctx, name, reflect.ValueOf(fn), args)
+}
+
+// callFuncValue invokes fv, an env function, struct field or bound
+// method, through the reflect path registered functions use.
+func callFuncValue(ctx context.Context, name string, fv reflect.Value, args []any) (any, error) {
 	if fv.Kind() != reflect.Func {
-		return nil, fmt.Errorf("%w: %q is not a function (got %T)", ErrEvaluate, name, fn)
+		return nil, fmt.Errorf("%w: %q is not a function (got %v)", ErrEvaluate, name, describeValue(fv))
 	}
 	if fv.IsNil() {
 		return nil, fmt.Errorf("%w: %q is a nil function value", ErrEvaluate, name)
 	}
-	ft := fv.Type()
-
-	in, err := buildCallArgs(ctx, name, ft, args)
+	sig, err := sigOf(fv.Type())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %q %v", ErrEvaluate, name, err)
 	}
+	return invokeReflect(ctx, name, fv, sig, args)
+}
 
-	out, err := callReflectRecoverRuntime(name, fv, in)
-	if err != nil {
-		return nil, err
+// describeValue names rv's type for an error message: its Go type, or
+// nil for an invalid Value.
+func describeValue(rv reflect.Value) string {
+	if !rv.IsValid() {
+		return "nil"
 	}
-	return finishCall(name, ft, out)
+	return rv.Type().String()
 }
 
 // callReflectRecoverRuntime invokes fv and converts runtime.Error
@@ -69,95 +81,32 @@ func callReflectRecoverRuntime(name string, fv reflect.Value, in []reflect.Value
 	return out, nil
 }
 
-func callMethodValue(ctx context.Context, name string, fv reflect.Value, args []any) (any, error) {
-	if fv.Kind() != reflect.Func {
-		return nil, fmt.Errorf("%w: %q is not a function (got %v)", ErrEvaluate, name, fv.Kind())
+// callResultErr extracts the error a function returned in v, whose type
+// implements error. A nil interface or nil pointer-like value is no
+// error; a value of a non-nilable kind (a struct implementing error) is
+// always one, as it is in Go once boxed in an error interface.
+func callResultErr(v reflect.Value) error {
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		if v.IsNil() {
+			return nil
+		}
 	}
-	if fv.IsNil() {
-		return nil, fmt.Errorf("%w: %q is a nil function value", ErrEvaluate, name)
-	}
-	ft := fv.Type()
-	in, err := buildCallArgs(ctx, name, ft, args)
-	if err != nil {
-		return nil, err
-	}
-	out, err := callReflectRecoverRuntime(name, fv, in)
-	if err != nil {
-		return nil, err
-	}
-	return finishCall(name, ft, out)
+	err, _ := v.Interface().(error)
+	return err
 }
 
-func finishCall(name string, ft reflect.Type, out []reflect.Value) (any, error) {
-	switch ft.NumOut() {
-	case 0:
-		return nil, nil
-	case 1:
-		return out[0].Interface(), nil
-	case 2:
-		if !ft.Out(1).Implements(errValType) {
-			return nil, fmt.Errorf("%w: %q: second return must be error, got %v", ErrEvaluate, name, ft.Out(1))
-		}
-		if !out[1].IsNil() {
-			return nil, out[1].Interface().(error)
-		}
-		return out[0].Interface(), nil
+// wrapCallErr wraps an error returned by a host function in ErrEvaluate,
+// keeping the original cause reachable through errors.Is / errors.As.
+// Errors that already wrap ErrEvaluate (builtins, nested Runs) pass
+// through unchanged, as do context cancellation errors, which try must
+// not swallow.
+func wrapCallErr(name string, err error) error {
+	if err == nil || errors.Is(err, ErrEvaluate) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	return nil, fmt.Errorf("%w: %q returns %d values (expected 0, 1, or (T, error))", ErrEvaluate, name, ft.NumOut())
-}
-
-func buildCallArgs(ctx context.Context, name string, ft reflect.Type, args []any) ([]reflect.Value, error) {
-	// Detect context.Context as the first declared parameter. If present,
-	// ctx is injected automatically and the remaining parameters are
-	// matched against the caller-supplied args.
-	injectCtx := ft.NumIn() > 0 && ft.In(0) == ctxType
-	paramOffset := 0
-	if injectCtx {
-		paramOffset = 1
-	}
-	declaredIn := ft.NumIn() - paramOffset
-
-	if ft.IsVariadic() {
-		fixed := declaredIn - 1
-		if len(args) < fixed {
-			return nil, fmt.Errorf("%w: %q expects at least %d args, got %d", ErrEvaluate, name, fixed, len(args))
-		}
-		in := make([]reflect.Value, paramOffset+len(args))
-		if injectCtx {
-			in[0] = reflect.ValueOf(ctx)
-		}
-		for i := 0; i < fixed; i++ {
-			v, err := convertArg(name, i, args[i], ft.In(paramOffset+i))
-			if err != nil {
-				return nil, err
-			}
-			in[paramOffset+i] = v
-		}
-		variadicElem := ft.In(paramOffset + fixed).Elem()
-		for i := fixed; i < len(args); i++ {
-			v, err := convertArg(name, i, args[i], variadicElem)
-			if err != nil {
-				return nil, err
-			}
-			in[paramOffset+i] = v
-		}
-		return in, nil
-	}
-	if len(args) != declaredIn {
-		return nil, fmt.Errorf("%w: %q expects %d args, got %d", ErrEvaluate, name, declaredIn, len(args))
-	}
-	in := make([]reflect.Value, paramOffset+len(args))
-	if injectCtx {
-		in[0] = reflect.ValueOf(ctx)
-	}
-	for i, a := range args {
-		v, err := convertArg(name, i, a, ft.In(paramOffset+i))
-		if err != nil {
-			return nil, err
-		}
-		in[paramOffset+i] = v
-	}
-	return in, nil
+	return fmt.Errorf("%w: %q: %w", ErrEvaluate, name, err)
 }
 
 func convertArg(name string, idx int, value any, want reflect.Type) (reflect.Value, error) {
@@ -188,10 +137,79 @@ func convertArg(name string, idx int, value any, want reflect.Type) (reflect.Val
 	if want.Kind() == reflect.Interface && rv.Type().Implements(want) {
 		return rv, nil
 	}
-	if rv.Type().ConvertibleTo(want) {
-		return rv.Convert(want), nil
+	if converted, ok := convertValue(rv, want); ok {
+		return converted, nil
 	}
 	return reflect.Value{}, fmt.Errorf("%w: %q arg %d: cannot use %T as %v", ErrEvaluate, name, idx, value, want)
+}
+
+// convertValue converts rv to want when Go allows it for this value.
+// reflect.Type.ConvertibleTo only checks types: converting a slice to an
+// array (or array pointer) also needs the slice to be long enough, and
+// reflect panics otherwise.
+func convertValue(rv reflect.Value, want reflect.Type) (reflect.Value, bool) {
+	if !rv.Type().ConvertibleTo(want) {
+		return reflect.Value{}, false
+	}
+	if rv.Kind() == reflect.Slice {
+		switch {
+		case want.Kind() == reflect.Array:
+			if rv.Len() < want.Len() {
+				return reflect.Value{}, false
+			}
+		case want.Kind() == reflect.Pointer && want.Elem().Kind() == reflect.Array:
+			if rv.Len() < want.Elem().Len() {
+				return reflect.Value{}, false
+			}
+		}
+	}
+	return rv.Convert(want), true
+}
+
+// mapKey converts idx to a key usable with a map of keyType. Beyond the
+// type conversion, the key must be hashable at run time: an interface
+// key type accepts any dynamic value, and hashing a slice (or a struct
+// or array holding one) panics.
+func mapKey(keyType reflect.Type, idx any) (reflect.Value, error) {
+	if idx == nil {
+		// Untyped nil is only a valid key for nilable key kinds; rather
+		// than handling every combination via reflect we reject it.
+		return reflect.Value{}, fmt.Errorf("%w: cannot use nil as map key %v", ErrEvaluate, keyType)
+	}
+	kv := reflect.ValueOf(idx)
+	if !kv.Type().AssignableTo(keyType) {
+		if isNumericKind(keyType.Kind()) && isNumericKind(kv.Kind()) {
+			// An integer key follows the index rule (xs[1.5] fails):
+			// a float must be integral, not truncated.
+			if isIntegerKind(keyType.Kind()) && (kv.Kind() == reflect.Float32 || kv.Kind() == reflect.Float64) {
+				if f := kv.Float(); f != math.Trunc(f) {
+					return reflect.Value{}, fmt.Errorf("%w: map key must be integer, got %v", ErrEvaluate, f)
+				}
+			}
+			converted, err := safeNumericConvert(kv, keyType)
+			if err != nil {
+				return reflect.Value{}, fmt.Errorf("%w: map key conversion: %v", ErrEvaluate, err)
+			}
+			kv = converted
+		} else if converted, ok := convertValue(kv, keyType); ok {
+			kv = converted
+		} else {
+			return reflect.Value{}, fmt.Errorf("%w: cannot use %T as map key %v", ErrEvaluate, idx, keyType)
+		}
+	}
+	if !canCompare(kv) {
+		return reflect.Value{}, fmt.Errorf("%w: cannot use unhashable %T as map key", ErrEvaluate, idx)
+	}
+	return kv, nil
+}
+
+// canCompare reports whether Go's == (and map hashing) accepts v without
+// panicking. Both checks are needed: Type.Comparable misses an
+// interface field holding a slice, and Value.Comparable reports a
+// zero-length array of uncomparable elements ([0]map[K]V) comparable
+// although == on it panics.
+func canCompare(v reflect.Value) bool {
+	return v.IsValid() && v.Type().Comparable() && v.Comparable()
 }
 
 func isNumericKind(k reflect.Kind) bool {
@@ -491,6 +509,11 @@ func looseEqual(lhs, rhs any) (bool, bool) {
 	if rhs == nil {
 		return isNilValue(lhs), true
 	}
+	// Two integers compare exactly, whatever their widths and
+	// signedness; float64 would round above 2^53.
+	if c, ok := compareIntegers(lhs, rhs); ok {
+		return c == 0, true
+	}
 	if lf, lok := toFloat64(lhs); lok {
 		if rf, rok := toFloat64(rhs); rok {
 			return lf == rf, true
@@ -506,18 +529,74 @@ func looseEqual(lhs, rhs any) (bool, bool) {
 			return lb == rb, true
 		}
 	}
-	lt := reflect.TypeOf(lhs)
-	if !lt.Comparable() {
+	// Value.Comparable, unlike Type.Comparable, also looks inside
+	// interface fields and elements: a struct or array holding a slice
+	// has a comparable type but panics when compared.
+	lv, rv := reflect.ValueOf(lhs), reflect.ValueOf(rhs)
+	if !canCompare(lv) || !canCompare(rv) {
 		return false, false
 	}
-	rt := reflect.TypeOf(rhs)
-	if !rt.Comparable() {
-		return false, false
-	}
-	if lt != rt {
+	if lv.Type() != rv.Type() {
 		return false, true
 	}
 	return lhs == rhs, true
+}
+
+// asInteger reads v as an integer of any Go integer kind (including
+// named types). A value above math.MaxInt64 comes back in u with big
+// set; otherwise it is in i.
+func asInteger(v any) (i int64, u uint64, big, ok bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, 0, false, true
+	case int:
+		return int64(n), 0, false, true
+	case nil:
+		return 0, 0, false, false
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int(), 0, false, true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if u := rv.Uint(); u > math.MaxInt64 {
+			return 0, u, true, true
+		}
+		return int64(rv.Uint()), 0, false, true
+	}
+	return 0, 0, false, false
+}
+
+// compareIntegers compares two integers exactly, returning -1, 0 or +1.
+// ok is false unless both are of an integer kind.
+func compareIntegers(lhs, rhs any) (int, bool) {
+	li, lu, lbig, lok := asInteger(lhs)
+	if !lok {
+		return 0, false
+	}
+	ri, ru, rbig, rok := asInteger(rhs)
+	if !rok {
+		return 0, false
+	}
+	switch {
+	case lbig && rbig:
+		return cmpOrdered(lu, ru), true
+	case lbig:
+		return 1, true // above every int64
+	case rbig:
+		return -1, true
+	}
+	return cmpOrdered(li, ri), true
+}
+
+func cmpOrdered[T int64 | uint64](a, b T) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 func asBool(v any) (bool, bool) {
